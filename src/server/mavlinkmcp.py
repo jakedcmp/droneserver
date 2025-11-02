@@ -41,11 +41,13 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
     # Read connection settings from environment (.env file)
     address = os.environ.get("MAVLINK_ADDRESS", "")
     port = os.environ.get("MAVLINK_PORT", "14540")
+    protocol = os.environ.get("MAVLINK_PROTOCOL", "udp").lower()
     
     # Display connection configuration
     logger.info("Configuration loaded from .env file:")
     logger.info("  MAVLINK_ADDRESS: %s", address if address else "(not set - using default)")
     logger.info("  MAVLINK_PORT: %s", port)
+    logger.info("  MAVLINK_PROTOCOL: %s", protocol)
     logger.info("=" * 60)
     
     if not address:
@@ -53,10 +55,15 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
         logger.warning("Please configure .env with your drone's IP address")
         raise ValueError("MAVLINK_ADDRESS not configured in .env file")
     
+    # Validate protocol
+    if protocol not in ["tcp", "udp", "serial"]:
+        logger.warning("Invalid protocol '%s', defaulting to udp", protocol)
+        protocol = "udp"
+    
     drone = System()
-    connection_string = f"udp://{address}:{port}"
+    connection_string = f"{protocol}://{address}:{port}"
     logger.info("Attempting connection to drone...")
-    logger.info("  Protocol: UDP")
+    logger.info("  Protocol: %s", protocol.upper())
     logger.info("  Target: %s:%s", address, port)
     logger.info("  Connection string: %s", connection_string)
     logger.info("-" * 60)
