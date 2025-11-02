@@ -1,10 +1,10 @@
 [project]
 name = "mavlinkmcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MAVLink MCP Server - AI-powered drone control via Model Context Protocol"
 authors = [
-    {name = "Ion Gabriel", email = "ion.ion.gabriel@gmail.com"},
-    {name = "Peter J Burke"}
+    {name = "Peter J Burke"},
+    {name = "Ion Gabriel", email = "ion.ion.gabriel@gmail.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}

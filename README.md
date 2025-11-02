@@ -111,8 +111,8 @@ Create a `.env` file in the project root:
 
 ```bash
 # Drone connection details
-MAVLINK_ADDRESS=172.233.128.95  # Your drone IP
-MAVLINK_PORT=5678               # MAVLink port
+MAVLINK_ADDRESS=<your-drone-ip>  # Your drone IP address
+MAVLINK_PORT=14540               # MAVLink port (default: 14540)
 ```
 
 For the AI agent, create `examples/fastagent.secrets.yaml`:

@@ -2,7 +2,7 @@
 
 ## 🚁 Complete Guide to Flying Your Drone with AI
 
-This guide will walk you through setting up and using the MAVLink MCP server to control your drone at **172.233.128.95:5678**.
+This guide will walk you through setting up and using the MAVLink MCP server to control your MAVLink-enabled drone.
 
 ---
 
@@ -24,7 +24,7 @@ This guide will walk you through setting up and using the MAVLink MCP server to 
 ### Required Software
 - **Python 3.10 or higher**
 - **pip** or **uv** package manager
-- **Network access** to your drone at 172.233.128.95:5678
+- **Network access** to your drone (via UDP, TCP, or serial)
 
 ### Required Accounts (for AI agent)
 - OpenAI API key (for GPT-4o-mini) or Anthropic API key (for Claude)
@@ -40,7 +40,7 @@ python --version  # Should show 3.10 or higher
 
 ### Step 1: Navigate to Project Directory
 ```bash
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 ```
 
 ### Step 2: Install uv Package Manager
@@ -80,11 +80,13 @@ Your drone connection is already configured in `.env`:
 cat .env
 ```
 
-Should show:
+Should show something like:
 ```
-MAVLINK_ADDRESS=172.233.128.95
-MAVLINK_PORT=5678
+MAVLINK_ADDRESS=<your-drone-ip>
+MAVLINK_PORT=14540
 ```
+
+**Note:** Replace with your actual drone's IP address and port.
 
 ✅ **This file is gitignored and won't be committed to GitHub.**
 
@@ -121,7 +123,7 @@ Before flying, verify the server can connect to your drone:
 
 ```bash
 # Make sure you're in the project root
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 
 # Run the MCP server (environment is loaded from .env automatically)
 uv run src/server/mavlinkmcp.py
@@ -129,9 +131,9 @@ uv run src/server/mavlinkmcp.py
 
 **Expected Output:**
 ```
-INFO - Connecting to drone at 172.233.128.95:5678
-INFO - Waiting for drone to connect at 172.233.128.95:5678
-INFO - Connected to drone at 172.233.128.95:5678!
+INFO - Connecting to drone at <your-drone-ip>:<port>
+INFO - Waiting for drone to connect at <your-drone-ip>:<port>
+INFO - Connected to drone at <your-drone-ip>:<port>!
 INFO - Waiting for drone to have a global position estimate...
 ```
 
@@ -157,7 +159,7 @@ The AI agent lets you control the drone using **natural language commands**.
 ### Step 6: Run the Example Agent
 
 ```bash
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 
 # Run the agent (environment is loaded from .env automatically)
 uv run examples/example_agent.py
@@ -292,12 +294,12 @@ For developers integrating with other systems, you can call MCP tools directly. 
 Solutions:
 1. Verify drone is powered on and network accessible:
    ```bash
-   ping 172.233.128.95
+   ping <your-drone-ip>
    ```
 
-2. Check if port 5678 is open:
+2. Check if port is open:
    ```bash
-   nc -zv 172.233.128.95 5678
+   nc -zv <your-drone-ip> <your-drone-port>
    ```
 
 3. Verify environment variables are set:
@@ -366,13 +368,13 @@ MAVLINK_PORT=14540
 
 ### Start MCP Server Only:
 ```bash
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 uv run src/server/mavlinkmcp.py
 ```
 
 ### Start AI Agent:
 ```bash
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 uv run examples/example_agent.py
 ```
 
@@ -383,8 +385,8 @@ uv run examples/example_agent.py
 
 ### Check Connection:
 ```bash
-ping 172.233.128.95
-nc -zv 172.233.128.95 5678
+ping <your-drone-ip>
+nc -zv <your-drone-ip> <your-drone-port>
 ```
 
 ---
@@ -403,10 +405,10 @@ Here's a complete example session:
 
 ```bash
 # Terminal 1: Start the agent
-cd /home/peter/Documents/CursorCode/MavlinkMCP
+cd MAVLinkMCP
 uv run examples/example_agent.py
 
-# You see: Connected to drone at 172.233.128.95:5678!
+# You see: Connected to drone at <your-drone-ip>:<port>!
 
 You: What is the current position?
 Agent: The drone is at latitude 47.397742, longitude 8.545594, altitude 0.0m

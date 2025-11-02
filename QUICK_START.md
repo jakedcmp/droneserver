@@ -38,15 +38,15 @@ That's it! All dependencies are now installed.
 
 ### 3. Configure Drone Connection
 
-Your `.env` file is already set up with:
-```bash
-MAVLINK_ADDRESS=172.233.128.95
-MAVLINK_PORT=5678
-```
-
-To change it:
+Edit the `.env` file with your drone's connection details:
 ```bash
 nano .env
+```
+
+Set your drone's IP and port:
+```bash
+MAVLINK_ADDRESS=<your-drone-ip>
+MAVLINK_PORT=14540  # Or your drone's specific port
 ```
 
 ### 4. Add API Key
@@ -125,7 +125,7 @@ You: STOP
 
 **Connection failed?**
 ```bash
-ping 172.233.128.95
+ping <your-drone-ip>
 ```
 
 **Dependencies issue?**
