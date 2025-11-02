@@ -14,19 +14,18 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+# Configuration - must set BEFORE importing mavlinkmcp module
+PORT = int(os.environ.get("MCP_PORT", "8080"))
+HOST = os.environ.get("MCP_HOST", "0.0.0.0")
+MOUNT_PATH = os.environ.get("MCP_MOUNT_PATH", "/mcp")
+
 # Load environment variables
 from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# Import the necessary components
-from mcp.server.fastmcp import FastMCP
-from src.server.mavlinkmcp import app_lifespan, logger
-
-# Configuration
-PORT = int(os.environ.get("MCP_PORT", "8080"))
-HOST = os.environ.get("MCP_HOST", "0.0.0.0")
-MOUNT_PATH = os.environ.get("MCP_MOUNT_PATH", "/mcp")
+# Now import after env vars are set
+from src.server.mavlinkmcp import logger
 
 if __name__ == "__main__":
     logger.info("=" * 60)
@@ -47,22 +46,13 @@ if __name__ == "__main__":
     logger.info("")
     logger.info("=" * 60)
     
-    # Create new FastMCP instance with correct host and port
-    mcp = FastMCP(
-        "MAVLink MCP",
-        lifespan=app_lifespan,
-        host=HOST,
-        port=PORT,
-        mount_path=MOUNT_PATH
-    )
+    # Import the mcp instance with all tools registered
+    from src.server.mavlinkmcp import mcp
     
-    # Import all the tool registrations from the main module
-    # This will register all the @mcp.tool() decorated functions
-    import src.server.mavlinkmcp as mav_module
-    
-    # Copy all registered tools from the original mcp instance
-    for tool_name, tool_func in mav_module.mcp._tools.items():
-        mcp._tools[tool_name] = tool_func
+    # Update settings on the existing mcp instance
+    mcp.settings.host = HOST
+    mcp.settings.port = PORT
+    mcp.settings.mount_path = MOUNT_PATH
     
     # Run server with SSE transport
     mcp.run(transport='sse', mount_path=MOUNT_PATH)
