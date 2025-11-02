@@ -247,9 +247,10 @@ async def stop_offboard_mode(connector: MAVLinkConnector) -> bool:
         return False
 
 @mcp.tool()
-async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> bool:
+async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, yaw: float) -> dict:
     """
     Move the drone relative to the current position. The drone must be armed and offboard mode must be active.
+    Waits for connection if not ready.
 
     Args:
         ctx (Context): the context.
@@ -259,14 +260,19 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
         yaw (float): yaw change.
 
     Returns:
-        bool: success flag.
+        dict: Status message with success or error.
     """
     connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
     drone = connector.drone
 
     # Activate offboard mode
     if not await start_offboard_mode(connector):
-        return False
+        return {"status": "failed", "error": "Failed to start offboard mode"}
 
     # Update the last offboard position
     connector.last_offboard_position.north_m += fb
@@ -278,7 +284,7 @@ async def move_to_relative(ctx: Context, lr: float, fb: float, altitude: float, 
     logger.info(f"Sending updated offboard position: {connector.last_offboard_position}")
     await drone.offboard.set_position_ned(connector.last_offboard_position)
 
-    return True
+    return {"status": "success", "message": f"Moved relative: forward={fb}m, right={lr}m, up={altitude}m, yaw={yaw}°"}
 
 @mcp.tool()
 async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
@@ -326,27 +332,39 @@ async def land(ctx: Context) -> dict:
 
 @mcp.tool()
 async def print_status_text(ctx: Context) -> dict:
-    """Print and return status text from the drone."""
-    drone = ctx.request_context.lifespan_context.drone
+    """Print and return status text from the drone. Waits for connection if not ready."""
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
     try:
         async for status_text in drone.telemetry.status_text():
             logger.info(f"Status: {status_text.type}: {status_text.text}")
-            return {"type": status_text.type, "text": status_text.text}  # Return a single dict
+            return {"status": "success", "type": status_text.type, "text": status_text.text}
     except asyncio.CancelledError:
-        return {"message": "Failed to retrieve status text"}  # Return a failure message
+        return {"status": "failed", "error": "Failed to retrieve status text"}
 
 @mcp.tool()
-async def get_imu(ctx: Context, n: int = 1) -> list:
-    """Fetch the first n IMU data points from the drone.
+async def get_imu(ctx: Context, n: int = 1) -> dict:
+    """Fetch the first n IMU data points from the drone. Waits for connection if not ready.
 
     Args:
         ctx (Context): The context of the request.
         n (int): The number of IMU data points to fetch. Default is 1.
 
     Returns:
-        list: A list of dictionaries containing IMU data points.
+        dict: A dict with status and list of IMU data points.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
     telemetry = drone.telemetry
 
     # Set the rate at which IMU data is updated (in Hz)
@@ -379,30 +397,36 @@ async def get_imu(ctx: Context, n: int = 1) -> list:
         if count >= n:
             break
 
-    return imu_data
+    return {"status": "success", "imu_data": imu_data, "count": len(imu_data)}
 
 @mcp.tool()
 async def print_mission_progress(ctx: Context) -> dict:
     """
-    Print and return the current mission progress of the drone.
+    Print and return the current mission progress of the drone. Waits for connection if not ready.
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: A dictionary containing the current and total mission progress.
+        dict: A dictionary containing the current and total mission progress or error status.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
     async for mission_progress in drone.mission.mission_progress():
         logger.info(f"Mission progress: {mission_progress.current}/{mission_progress.total}")
-        return {"current": mission_progress.current, "total": mission_progress.total}
+        return {"status": "success", "current": mission_progress.current, "total": mission_progress.total}
 
 
 
 @mcp.tool()
-async def initiate_mission(ctx: Context, mission_points: list, return_to_launch: bool = True) -> bool:
+async def initiate_mission(ctx: Context, mission_points: list, return_to_launch: bool = True) -> dict:
     """
-    Initiate a mission with a list of mission points. The drone must be armed.
+    Initiate a mission with a list of mission points. The drone must be armed. Waits for connection if not ready.
 
     Args:
         ctx (Context): The context of the request.
@@ -424,9 +448,15 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
         return_to_launch (bool): Whether to return to launch after completing the mission. Default is True.
 
     Returns:
-        bool: True if the mission was successfully initiated.
+        dict: Status message with success or error.
     """
-    drone = ctx.request_context.lifespan_context.drone
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
 
     # Validate and construct mission items
     mission_items = []
@@ -434,9 +464,9 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
         try:
             # Validate latitude and longitude ranges
             if not (-90 <= point["latitude_deg"] <= 90):
-                raise ValueError(f"Invalid latitude_deg: {point['latitude_deg']}. Must be between -90 and 90.")
+                return {"status": "failed", "error": f"Invalid latitude_deg: {point['latitude_deg']}. Must be between -90 and 90."}
             if not (-180 <= point["longitude_deg"] <= 180):
-                raise ValueError(f"Invalid longitude_deg: {point['longitude_deg']}. Must be between -180 and 180.")
+                return {"status": "failed", "error": f"Invalid longitude_deg: {point['longitude_deg']}. Must be between -180 and 180."}
 
             mission_items.append(MissionItem(
                 latitude_deg=point["latitude_deg"],
@@ -455,7 +485,7 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
                 vehicle_action=point.get("vehicle_action", MissionItem.VehicleAction.NONE)
             ))
         except KeyError as e:
-            raise ValueError(f"Missing required field in mission point: {e}")
+            return {"status": "failed", "error": f"Missing required field in mission point: {e}"}
 
     mission_plan = MissionPlan(mission_items)
 
@@ -468,7 +498,7 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     logger.info("Starting mission")
     await drone.mission.start_mission()
 
-    return True
+    return {"status": "success", "message": f"Mission started with {len(mission_items)} waypoints"}
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> dict:
