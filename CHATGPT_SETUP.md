@@ -100,30 +100,206 @@ INFO - MCP Server is READY and exposing drone control tools
 
 ---
 
-## Step 3: Get Your Server URL
+## Step 3: Set Up HTTPS with ngrok (Required for ChatGPT)
 
-### A. Find Your Server IP
+⚠️ **IMPORTANT:** ChatGPT requires **HTTPS** for security. You cannot use plain `http://` URLs.
 
-If running on a cloud instance:
+ChatGPT will reject URLs like `http://YOUR_IP:8080/mcp/sse` with an "unsafe URL" error.
+
+**Solution:** Use **ngrok** to create a secure HTTPS tunnel to your server.
+
+### A. Install ngrok
+
+**On your Ubuntu server:**
+
 ```bash
-# Get your public IP
-curl ifconfig.me
+# Download and install ngrok
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+  | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+  && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+  | sudo tee /etc/apt/sources.list.d/ngrok.list \
+  && sudo apt update \
+  && sudo apt install ngrok
 ```
 
-Example output: `203.0.113.10`
+### B. Get Your ngrok Auth Token
 
-### B. Construct Your MCP Server URL
+1. **Sign up for ngrok** (free): [https://ngrok.com/signup](https://ngrok.com/signup)
+2. **Log in** and go to: [https://dashboard.ngrok.com/get-started/your-authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)
+3. **Copy your auth token** (looks like: `2abc123def456ghi789jkl`)
 
-Format: `http://YOUR_SERVER_IP:8080/mcp/sse`
+### C. Configure ngrok
 
-Example: `http://203.0.113.10:8080/mcp/sse`
+```bash
+# Add your auth token (replace with your actual token)
+ngrok config add-authtoken YOUR_NGROK_TOKEN
+```
 
-**Write this down - you'll need it for ChatGPT!**
+### D. Start ngrok Tunnel
 
-**Note:** The URL includes:
-- Your server's public IP address
-- Port 8080 (default MCP server port)
-- `/mcp/sse` path (mount point + SSE endpoint)
+**Open a NEW terminal/SSH session** (keep your MCP server running in the first one):
+
+```bash
+# Create HTTPS tunnel to your MCP server
+ngrok http 8080
+```
+
+**You'll see output like:**
+```
+ngrok
+
+Session Status                online
+Account                       your-email@example.com (Plan: Free)
+Version                       3.x.x
+Region                        United States (us)
+Web Interface                 http://127.0.0.1:4040
+Forwarding                    https://abc123xyz.ngrok-free.app -> http://localhost:8080
+
+Connections                   ttl     opn     rt1     rt5     p50     p90
+                              0       0       0.00    0.00    0.00    0.00
+```
+
+### E. Get Your HTTPS URL
+
+Look for the **Forwarding** line with `https://`:
+
+```
+Forwarding                    https://abc123xyz.ngrok-free.app -> http://localhost:8080
+```
+
+**Copy the HTTPS URL:** `https://abc123xyz.ngrok-free.app`
+
+**Your complete ChatGPT MCP URL is:**
+```
+https://abc123xyz.ngrok-free.app/mcp/sse
+```
+
+⚠️ **Keep both terminals running:**
+- Terminal 1: MCP server (`./start_http_server.sh`)
+- Terminal 2: ngrok tunnel (`ngrok http 8080`)
+
+---
+
+### Using tmux/screen for Persistent Sessions (Recommended)
+
+To keep both running even if you disconnect from SSH:
+
+**Using tmux:**
+```bash
+# Install tmux
+sudo apt install tmux
+
+# Start tmux session
+tmux new -s drone
+
+# Terminal 1: Start MCP server
+cd ~/MAVLinkMCP
+./start_http_server.sh
+
+# Press Ctrl+B then C (create new window)
+
+# Terminal 2: Start ngrok
+ngrok http 8080
+
+# Detach from tmux: Press Ctrl+B then D
+# Reattach later: tmux attach -t drone
+```
+
+**Using screen:**
+```bash
+# Install screen
+sudo apt install screen
+
+# Start screen session
+screen -S drone
+
+# Terminal 1: Start MCP server
+cd ~/MAVLinkMCP
+./start_http_server.sh
+
+# Press Ctrl+A then C (create new window)
+
+# Terminal 2: Start ngrok
+ngrok http 8080
+
+# Detach from screen: Press Ctrl+A then D
+# Reattach later: screen -r drone
+```
+
+---
+
+### Quick Start Script (Both MCP + ngrok)
+
+Create a helper script:
+
+```bash
+nano ~/start_drone_chatgpt.sh
+```
+
+Add:
+```bash
+#!/bin/bash
+
+echo "Starting MAVLink MCP Server for ChatGPT..."
+echo ""
+
+# Check if tmux is installed
+if ! command -v tmux &> /dev/null; then
+    echo "Installing tmux..."
+    sudo apt install -y tmux
+fi
+
+# Start tmux session with MCP server and ngrok
+tmux new-session -d -s drone "cd ~/MAVLinkMCP && ./start_http_server.sh"
+tmux split-window -h -t drone "sleep 5 && ngrok http 8080"
+
+echo "✅ Started!"
+echo ""
+echo "To view the ngrok URL:"
+echo "  tmux attach -t drone"
+echo ""
+echo "To detach (keep running):"
+echo "  Press Ctrl+B then D"
+echo ""
+echo "To stop everything:"
+echo "  tmux kill-session -t drone"
+```
+
+Make executable:
+```bash
+chmod +x ~/start_drone_chatgpt.sh
+```
+
+**Usage:**
+```bash
+# Start both MCP server and ngrok
+~/start_drone_chatgpt.sh
+
+# Attach to see the ngrok URL
+tmux attach -t drone
+
+# Copy the https:// URL, then detach (Ctrl+B, then D)
+```
+
+---
+
+### ngrok Free Tier Notes
+
+✅ **Included:**
+- HTTPS support
+- Up to 1 free domain
+- Basic tunneling features
+
+⚠️ **Limitations:**
+- URL changes each time you restart ngrok
+- 40 connections/minute rate limit
+- Session timeout after ~8 hours
+
+**For production:** Consider ngrok paid plans ($8/month) for:
+- Custom domain (e.g., `drone.yourdomain.com`)
+- Reserved URLs that don't change
+- No rate limits
+- No session timeouts
 
 ---
 
@@ -147,17 +323,19 @@ In Developer Mode settings:
 ```
 Name: MAVLink Drone Controller
 Description: Control MAVLink drones with natural language
-Server URL: http://YOUR_SERVER_IP:8080/mcp/sse
+Server URL: https://YOUR_NGROK_URL.ngrok-free.app/mcp/sse
 Type: MCP Server (SSE)
 ```
 
-**Example:**
+**Example (use YOUR actual ngrok URL):**
 ```
 Name: MAVLink Drone Controller
 Description: AI-powered drone flight control
-Server URL: http://203.0.113.10:8080/mcp/sse
+Server URL: https://abc123xyz.ngrok-free.app/mcp/sse
 Type: MCP Server (SSE)
 ```
+
+⚠️ **Important:** Replace `abc123xyz.ngrok-free.app` with your actual ngrok URL from Step 3!
 
 3. Click **Save** or **Connect**
 
@@ -169,10 +347,11 @@ ChatGPT should show:
 - Green indicator showing active connection
 
 If you see **"Connection Error"**, check:
-- Server is running (`./start_http_server.sh`)
-- Firewall allows port 8080
-- URL is correct (including `/sse` at the end)
-- Server IP is accessible from your location
+- MCP server is running (`./start_http_server.sh`)
+- ngrok tunnel is running (`ngrok http 8080`)
+- URL is correct HTTPS format: `https://xxx.ngrok-free.app/mcp/sse`
+- URL includes `/mcp/sse` at the end
+- You're using the HTTPS URL from ngrok, not http://
 
 ---
 
@@ -267,31 +446,40 @@ All systems nominal - safe to fly!"
 
 ## Troubleshooting
 
-### Issue 1: "Cannot connect to MCP server"
+### Issue 1: "Cannot connect to MCP server" or "Unsafe URL"
 
 **Solutions:**
 
-1. **Check server is running:**
+1. **Verify HTTPS URL:**
+   - ❌ Wrong: `http://64.225.115.101:8080/mcp/sse`
+   - ✅ Correct: `https://abc123xyz.ngrok-free.app/mcp/sse`
+   
+   ChatGPT requires HTTPS! You must use ngrok.
+
+2. **Check MCP server is running:**
    ```bash
    # On your server
    ps aux | grep mavlinkmcp_http
    ```
 
-2. **Verify port is open:**
+3. **Check ngrok tunnel is running:**
    ```bash
    # On your server
-   sudo netstat -tulpn | grep 8080
+   ps aux | grep ngrok
+   
+   # Or view ngrok status
+   curl http://localhost:4040/api/tunnels
    ```
 
-3. **Test with curl:**
+4. **Restart ngrok if needed:**
    ```bash
-   curl http://YOUR_SERVER_IP:8080/mcp/sse
-   ```
-
-4. **Check firewall:**
-   ```bash
-   # Allow port 8080
-   sudo ufw allow 8080/tcp
+   # Kill existing ngrok
+   pkill ngrok
+   
+   # Start new tunnel
+   ngrok http 8080
+   
+   # Copy the NEW https:// URL
    ```
 
 ---
@@ -300,17 +488,22 @@ All systems nominal - safe to fly!"
 
 **Solutions:**
 
-1. **Use public IP, not localhost:**
-   - ❌ Wrong: `http://localhost:8080/mcp/sse`
-   - ✅ Correct: `http://203.0.113.10:8080/mcp/sse`
+1. **Use ngrok HTTPS URL, not direct IP:**
+   - ❌ Wrong: `http://64.225.115.101:8080/mcp/sse`
+   - ❌ Wrong: `https://64.225.115.101:8080/mcp/sse`
+   - ✅ Correct: `https://abc123xyz.ngrok-free.app/mcp/sse`
 
 2. **Ensure correct path:**
-   - ❌ Wrong: `http://203.0.113.10:8080`
-   - ❌ Wrong: `http://203.0.113.10:8080/sse`
-   - ✅ Correct: `http://203.0.113.10:8080/mcp/sse`
+   - ❌ Wrong: `https://abc123xyz.ngrok-free.app`
+   - ❌ Wrong: `https://abc123xyz.ngrok-free.app/sse`
+   - ✅ Correct: `https://abc123xyz.ngrok-free.app/mcp/sse`
 
-3. **Check HTTPS vs HTTP:**
-   - Use `http://` not `https://` (unless you've set up SSL)
+3. **Get fresh ngrok URL:**
+   ```bash
+   # ngrok URLs change on restart
+   # View your current URL:
+   curl http://localhost:4040/api/tunnels | grep public_url
+   ```
 
 ---
 
@@ -320,8 +513,18 @@ All systems nominal - safe to fly!"
 
 1. **Start a new conversation** - Tools only appear in new chats
 2. **Reconnect the connector** in Developer Mode settings
-3. **Check server logs** for connection attempts
+3. **Check both servers are running:**
+   ```bash
+   # Check MCP server
+   ps aux | grep mavlinkmcp_http
+   
+   # Check ngrok
+   ps aux | grep ngrok
+   ```
 4. **Verify MCP server shows tools** in startup logs
+5. **Check ngrok web interface** for requests:
+   - Open browser to: `http://YOUR_SERVER_IP:4040`
+   - See if ChatGPT is making requests
 
 ---
 
@@ -347,24 +550,33 @@ All systems nominal - safe to fly!"
 ⚠️ **IMPORTANT SECURITY NOTES:**
 
 1. **Network Exposure:**
-   - Your MCP server is accessible over the network
-   - Anyone with the URL can control your drone
-   - Use a firewall and restrict access by IP if possible
+   - Your MCP server is accessible via ngrok's public HTTPS URL
+   - Anyone with the ngrok URL can control your drone
+   - ngrok provides some security, but the URL should be kept private
 
 2. **Authentication:**
    - Current setup has NO authentication
-   - Consider adding authentication for production use
-   - Use VPN or SSH tunnel for secure access
+   - ngrok URLs are long and random, providing some obscurity
+   - Don't share your ngrok URL publicly
 
-3. **Recommended Security:**
-   ```bash
-   # Option 1: Only allow from specific IP (ChatGPT's IP)
-   sudo ufw allow from CHATGPT_IP to any port 8080
+3. **ngrok Security Features:**
+   - **Free tier:** Basic password protection available
+   - **Paid tier:** IP restrictions, OAuth, webhook verification
    
-   # Option 2: Use SSH tunnel (most secure)
-   ssh -L 8080:localhost:8080 user@YOUR_SERVER_IP
-   # Then use: http://localhost:8080/sse in ChatGPT
+   **Add password protection (free):**
+   ```bash
+   ngrok http 8080 --basic-auth "username:password"
    ```
+   
+   Then configure auth in ChatGPT connector settings.
+
+4. **Best Practices:**
+   - ✅ Use ngrok's random URLs (hard to guess)
+   - ✅ Rotate ngrok URLs regularly (restart ngrok)
+   - ✅ Monitor ngrok web interface (http://localhost:4040) for suspicious activity
+   - ✅ Keep your ngrok auth token private
+   - ❌ Don't post your ngrok URL on social media
+   - ❌ Don't commit ngrok URLs to git
 
 ---
 
