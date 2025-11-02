@@ -24,8 +24,8 @@ Repository = "https://github.com/PeterJBurke/MAVLinkMCP"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

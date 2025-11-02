@@ -65,7 +65,13 @@ uv --version
 ```bash
 git clone https://github.com/PeterJBurke/MAVLinkMCP.git
 cd MAVLinkMCP
+
+# Install all dependencies
 uv sync
+
+# If you get module import errors, try removing the lock file and reinstalling
+# rm uv.lock
+# uv sync --upgrade
 ```
 
 ### 3. Configure Connection and API Keys
@@ -307,6 +313,82 @@ MIT License - see [LICENSE](LICENSE) file for details.
 - **Set spending limits** - both platforms allow budget controls
 - **Rotate keys regularly** - especially if you suspect they've been exposed
 - **Use separate keys** - for development vs production
+
+## Troubleshooting
+
+### ModuleNotFoundError: No module named 'mcp_agent'
+
+If you see this error when running the agent:
+```
+ModuleNotFoundError: No module named 'mcp_agent.core.fastagent'
+```
+
+**Solution:**
+```bash
+cd MAVLinkMCP
+
+# Remove the lock file
+rm uv.lock
+
+# Reinstall with latest versions
+uv sync --upgrade
+
+# Verify installation
+uv run python -c "import mcp_agent; print('mcp_agent installed successfully')"
+```
+
+### Warning about deprecated dev-dependencies
+
+If you see:
+```
+warning: The `tool.uv.dev-dependencies` field is deprecated
+```
+
+This warning is harmless but to fix it, run:
+```bash
+git pull origin main  # Get latest pyproject.toml with the fix
+uv sync
+```
+
+### Connection to drone fails
+
+1. **Check drone is reachable:**
+   ```bash
+   ping <your-drone-ip>
+   ```
+
+2. **Verify .env file:**
+   ```bash
+   cat .env
+   # Should show your drone's IP and port
+   ```
+
+3. **Check port accessibility:**
+   ```bash
+   nc -zv <your-drone-ip> <port>
+   ```
+
+4. **Verify environment variables:**
+   ```bash
+   uv run python -c "import os; print(os.getenv('MAVLINK_ADDRESS'), os.getenv('MAVLINK_PORT'))"
+   ```
+
+### API Key not working
+
+1. **Verify secrets file exists:**
+   ```bash
+   ls -la examples/fastagent.secrets.yaml
+   ```
+
+2. **Check file contents:**
+   ```bash
+   cat examples/fastagent.secrets.yaml
+   # Should show your API key (keep it private!)
+   ```
+
+3. **Verify proper YAML formatting:**
+   - Use spaces, not tabs for indentation
+   - Ensure proper key structure as shown in the guide
 
 ## Support
 
