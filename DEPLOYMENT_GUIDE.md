@@ -38,8 +38,12 @@ python --version  # Should show 3.10 or higher
 
 ## Installation
 
-### Step 1: Navigate to Project Directory
+### Step 1: Clone the Repository
+
+First, clone the repository to your local machine:
+
 ```bash
+git clone https://github.com/PeterJBurke/MAVLinkMCP.git
 cd MAVLinkMCP
 ```
 
@@ -73,7 +77,7 @@ This will:
 
 ## Configuration
 
-### Step 3: Verify Drone Connection Settings
+### Step 4: Verify Drone Connection Settings
 
 Your drone connection is already configured in `.env`:
 ```bash
@@ -90,7 +94,7 @@ MAVLINK_PORT=14540
 
 ✅ **This file is gitignored and won't be committed to GitHub.**
 
-### Step 4: Set Up API Keys (For AI Agent Usage)
+### Step 5: Set Up API Keys (For AI Agent Usage)
 
 If you want to use the AI agent to control the drone with natural language, create the secrets file:
 
@@ -117,7 +121,7 @@ anthropic:
 
 ## Testing the Connection
 
-### Step 5: Test Basic MCP Server Connection
+### Step 6: Test Basic MCP Server Connection
 
 Before flying, verify the server can connect to your drone:
 
@@ -156,7 +160,7 @@ You have **two ways** to control your drone:
 
 The AI agent lets you control the drone using **natural language commands**.
 
-### Step 6: Run the Example Agent
+### Step 7: Run the Example Agent
 
 ```bash
 cd MAVLinkMCP
@@ -165,7 +169,7 @@ cd MAVLinkMCP
 uv run examples/example_agent.py
 ```
 
-### Step 7: Start Flying! 🚁
+### Step 8: Start Flying! 🚁
 
 The agent will start and you can type commands. Here are examples:
 
