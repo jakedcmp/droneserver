@@ -124,9 +124,17 @@ Should show something like:
 ```
 MAVLINK_ADDRESS=<your-drone-ip>
 MAVLINK_PORT=14540
+MAVLINK_PROTOCOL=tcp
 ```
 
-**Note:** Replace with your actual drone's IP address and port.
+**Protocol Selection:**
+- **TCP:** Use for remote/cloud drones or network connections (most common)
+- **UDP:** Use for local simulators (PX4 SITL, Gazebo)
+- **Serial:** Use for direct USB/serial connections
+
+> **Important:** If QGROUNDCONTROL connects successfully to your drone, use the same protocol (usually TCP for network drones).
+
+**Note:** Replace with your actual drone's IP address, port, and protocol.
 
 ✅ **This file is gitignored and won't be committed to GitHub.**
 
@@ -408,6 +416,7 @@ For development/testing, you can use a **simulated drone** with PX4 SITL (Softwa
 # Then change .env to:
 MAVLINK_ADDRESS=127.0.0.1
 MAVLINK_PORT=14540
+MAVLINK_PROTOCOL=udp
 ```
 
 ---

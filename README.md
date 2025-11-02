@@ -92,7 +92,15 @@ Set your drone's connection details:
 ```bash
 MAVLINK_ADDRESS=<your-drone-ip>
 MAVLINK_PORT=14540  # Or your drone's specific port
+MAVLINK_PROTOCOL=tcp  # tcp, udp, or serial
 ```
+
+**Protocol Selection:**
+- **TCP:** Use for remote/cloud drones or network connections (most common)
+- **UDP:** Use for local simulators (PX4 SITL, Gazebo)
+- **Serial:** Use for direct USB/serial connections
+
+> **Tip:** If QGROUNDCONTROL connects successfully to your drone, use the same protocol it uses (usually TCP for network connections).
 
 **Save and exit:** Press `Ctrl+X`, then `Y`, then `Enter`
 
