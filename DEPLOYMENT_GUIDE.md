@@ -40,24 +40,29 @@ python --version  # Should show 3.10 or higher
 
 ---
 
-## System Preparation (Ubuntu 22.04)
+## System Preparation (Ubuntu)
 
-**If you're starting from a fresh cloud instance** (AWS, Digital Ocean, Linode, etc.) or a new Ubuntu 22.04 system:
+**If you're starting from a fresh cloud instance** (AWS, Digital Ocean, Linode, etc.) or a new Ubuntu system (22.04 or 24.04):
 
 ### Prepare the System
 
 ```bash
-# Update system packages
-sudo apt update && sudo apt upgrade -y
+# Update package list
+sudo apt update
+
+# Upgrade packages (non-interactive, no prompts)
+sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 # Install essential dependencies
 sudo apt install -y python3 python3-pip python3-venv git curl build-essential
 
-# Verify Python version (Ubuntu 22.04 comes with Python 3.10)
+# Verify Python version
 python3 --version
 ```
 
-**Expected output:** `Python 3.10.x` or higher
+**Expected output:** 
+- Ubuntu 22.04: `Python 3.10.x`
+- Ubuntu 24.04: `Python 3.12.x`
 
 ---
 

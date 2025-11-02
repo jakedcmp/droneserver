@@ -22,11 +22,14 @@ A Python-based Model Context Protocol (MCP) server for AI-powered drone control.
 
 ### 1. Set Up Your System
 
-**If starting from a fresh Ubuntu 22.04 instance** (AWS, Digital Ocean, Linode, etc.):
+**If starting from a fresh Ubuntu instance** (22.04 or 24.04 on AWS, Digital Ocean, Linode, etc.):
 
 ```bash
-# Update system packages
-sudo apt update && sudo apt upgrade -y
+# Update package list
+sudo apt update
+
+# Upgrade packages (non-interactive, no prompts)
+sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 # Install essential dependencies
 sudo apt install -y python3 python3-pip python3-venv git curl build-essential
