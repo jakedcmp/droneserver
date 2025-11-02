@@ -20,10 +20,38 @@ A Python-based Model Context Protocol (MCP) server for AI-powered drone control.
 
 ## Quick Start
 
-### 1. Install uv (if not already installed)
+### 1. Set Up Your System
+
+**If starting from a fresh Ubuntu 22.04 instance** (AWS, Digital Ocean, Linode, etc.):
+
+```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install essential dependencies
+sudo apt install -y python3 python3-pip python3-venv git curl build-essential
+
+# Verify Python version (should be 3.10+)
+python3 --version
+```
+
+**Install uv package manager:**
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Restart your shell or load the environment:**
+
+```bash
+source $HOME/.bashrc
+# Or if using zsh: source $HOME/.zshrc
+```
+
+**Verify uv installation:**
+
+```bash
+uv --version
 ```
 
 ### 2. Clone and Install

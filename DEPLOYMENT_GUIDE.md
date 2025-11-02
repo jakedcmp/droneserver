@@ -40,11 +40,32 @@ python --version  # Should show 3.10 or higher
 
 ---
 
+## System Preparation (Ubuntu 22.04)
+
+**If you're starting from a fresh cloud instance** (AWS, Digital Ocean, Linode, etc.) or a new Ubuntu 22.04 system:
+
+### Prepare the System
+
+```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install essential dependencies
+sudo apt install -y python3 python3-pip python3-venv git curl build-essential
+
+# Verify Python version (Ubuntu 22.04 comes with Python 3.10)
+python3 --version
+```
+
+**Expected output:** `Python 3.10.x` or higher
+
+---
+
 ## Installation
 
 ### Step 1: Clone the Repository
 
-First, clone the repository to your local machine:
+Clone the repository to your system:
 
 ```bash
 git clone https://github.com/PeterJBurke/MAVLinkMCP.git
@@ -57,6 +78,13 @@ Install `uv` if you don't have it already:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Restart your shell or load the environment:**
+
+```bash
+source $HOME/.bashrc
+# Or if using zsh: source $HOME/.zshrc
 ```
 
 Verify installation:
