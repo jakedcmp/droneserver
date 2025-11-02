@@ -50,18 +50,26 @@ MAVLINK_ADDRESS=<your-drone-ip>
 MAVLINK_PORT=14540  # Or your drone's specific port
 ```
 
-### 4. Add API Key
+### 4. Add API Key (Required for AI Agent)
 
 Create the secrets file:
 ```bash
 nano examples/fastagent.secrets.yaml
 ```
 
-Add your key:
+Add your OpenAI or Anthropic API key:
 ```yaml
 openai:
-    api_key: sk-your-actual-key-here
+    api_key: sk-your-actual-openai-key-here
 ```
+
+Or for Claude:
+```yaml
+anthropic:
+    api_key: sk-ant-your-anthropic-key-here
+```
+
+**Save and exit:** Press `Ctrl+X`, then `Y`, then `Enter`
 
 ---
 
