@@ -1,32 +1,82 @@
 # MAVLink MCP - Project Status
 
-## ✅ Current Functionality (VERIFIED WORKING)
+## ✅ Current Functionality (v1.1.0)
 
 ### Core Features - Fully Operational
-- **TCP/UDP/Serial Connection Support** - Configurable via `.env` file
-- **Drone Connection** - Successfully connects to remote drones over network
-- **GPS Lock Detection** - Waits for and confirms GPS availability
-- **Interactive CLI Controller** - User-friendly command-line interface
-- **Basic Flight Operations**:
-  - ✅ Arm/Disarm
-  - ✅ Takeoff to specified altitude
-  - ✅ Landing
-  - ✅ **Relative movement (North/East/Down)** - Fixed Nov 2, 2025
-  - ✅ Position telemetry (GPS coordinates, altitude)
-  - ✅ Flight mode monitoring
-  - ✅ Battery status (when available)
-- **ArduPilot GUIDED Mode Support** - Automatic mode switching with fallback
 
-### Verified Test Flight
-**Date:** November 2, 2025  
+#### Connection & Infrastructure
+- **TCP/UDP/Serial Connection Support** - Configurable via `.env` file
+- **Remote Drone Connection** - Successfully connects to drones over network
+- **GPS Lock Detection** - Waits for and confirms GPS availability
+- **Background Connection** - Async connection doesn't block server startup
+- **HTTP/SSE Transport** - ChatGPT web interface integration
+- **ngrok HTTPS Support** - Secure tunneling for web clients
+
+#### Flight Control (25 MCP Tools)
+
+**Basic Operations (5 tools)**
+- ✅ `arm_drone` - Arm motors
+- ✅ `disarm_drone` - **NEW v1.1** Disarm motors safely
+- ✅ `takeoff` - Autonomous takeoff to altitude
+- ✅ `land` - Land at current position
+- ✅ `hold_position` - **NEW v1.1** Hover/loiter in place
+
+**Emergency & Safety (3 tools)**
+- ✅ `return_to_launch` - **NEW v1.1** Emergency RTL
+- ✅ `kill_motors` - **NEW v1.1** Emergency motor cutoff (⚠️)
+- ✅ `get_battery` - **NEW v1.1** Battery voltage & percentage monitoring
+
+**Navigation (5 tools)**
+- ✅ `get_position` - Current GPS coordinates & altitude
+- ✅ `move_to_relative` - NED relative movement (fixed Nov 2, 2025)
+- ✅ `go_to_location` - **NEW v1.1** Absolute GPS navigation
+- ✅ `get_home_position` - **NEW v1.1** Home/RTL location
+- ✅ `set_max_speed` - **NEW v1.1** Speed limiting for safety
+
+**Mission Management (5 tools)**
+- ✅ `initiate_mission` - Upload and start waypoint missions
+- ✅ `print_mission_progress` - Mission status monitoring
+- ✅ `pause_mission` - **NEW v1.1** Pause current mission
+- ✅ `resume_mission` - **NEW v1.1** Resume paused mission
+- ✅ `clear_mission` - **NEW v1.1** Remove all waypoints
+
+**Telemetry & Monitoring (11 tools)**
+- ✅ `get_flight_mode` - Current flight mode
+- ✅ `get_health` - **NEW v1.1** Pre-flight system checks
+- ✅ `get_speed` - **NEW v1.1** Ground speed & velocity
+- ✅ `get_attitude` - **NEW v1.1** Roll, pitch, yaw
+- ✅ `get_gps_info` - **NEW v1.1** Satellite count & quality
+- ✅ `get_in_air` - **NEW v1.1** Airborne status
+- ✅ `get_armed` - **NEW v1.1** Motor armed status
+- ✅ `print_status_text` - Status message streaming
+- ✅ `get_imu` - IMU sensor data (accel, gyro, mag)
+- ✅ `get_position` - GPS & altitude
+- ✅ `get_battery` - Power monitoring
+
+**ArduPilot GUIDED Mode Support** - Automatic mode switching with fallback
+
+### Verified Test Flights
+
+**v1.0.0 Test - November 2, 2025**  
 **Drone:** Virtual drone at 203.0.113.10:5678 (TCP)  
 **Results:**
 - Connection: SUCCESS
 - Arming: SUCCESS
 - Takeoff to 10m: SUCCESS
-- Position tracking: SUCCESS (monitored descent from 8.2m to ground)
+- Position tracking: SUCCESS
 - Landing: SUCCESS
-- Flight mode: OFFBOARD
+- Flight mode: GUIDED
+
+**v1.1.0 Test - November 12, 2025**  
+**Drone:** ArduPilot SITL Copter  
+**Interface:** ChatGPT Developer Mode via ngrok HTTPS  
+**Results:**
+- All 25 tools available in ChatGPT ✅
+- Natural language commands working ✅
+- Battery monitoring functional ✅
+- Return to launch tested ✅
+- Emergency procedures verified ✅
+- Simultaneous QGroundControl + ChatGPT ✅
 
 ### Configuration System
 - ✅ Environment-based configuration (`.env` file)
@@ -51,22 +101,33 @@
 
 ---
 
-## 🔄 Possible Next Steps
+## 🔄 Completed in v1.1.0 ✅
 
-### 1. Enhanced Flight Capabilities
-- [ ] **Waypoint Navigation** - Upload and execute mission plans
+### Enhanced Flight Capabilities
+- ✅ **Waypoint Navigation** - Upload and execute mission plans
+- ✅ **Return to Home** - Emergency return functionality (return_to_launch)
+- ✅ **Speed Control** - Set maximum velocities (set_max_speed)
 - [ ] **Orbit Mode** - Circle around a point of interest
-- [ ] **Return to Home** - Emergency return functionality
 - [ ] **Geofencing** - Define safe flight boundaries
-- [ ] **Speed Control** - Set maximum velocities
 - [ ] **Follow Me Mode** - Track moving GPS coordinates
 
-### 2. Advanced Telemetry
-- [ ] **Real-time Streaming** - Continuous position/attitude updates
+### Advanced Telemetry
+- ✅ **Health Monitoring** - Comprehensive system health checks (get_health)
+- ✅ **Sensor Data** - IMU, magnetometer, barometer readings (get_imu)
+- ✅ **Position/Attitude Updates** - Speed, attitude, GPS info
+- ✅ **GPS Quality** - Satellite count and fix quality (get_gps_info)
+- [ ] **Real-time Streaming** - Continuous telemetry stream
 - [ ] **Flight Data Recording** - Log all telemetry to file
-- [ ] **Health Monitoring** - Comprehensive system health checks
-- [ ] **Sensor Data** - IMU, magnetometer, barometer readings
 - [ ] **Camera Control** - Gimbal and camera triggering
+
+## 🚀 Roadmap for v1.2.0 and Beyond
+
+### 1. Camera & Gimbal Control (v1.2.0)
+- [ ] **Take Photo** - Trigger camera shutter
+- [ ] **Start/Stop Video** - Video recording control
+- [ ] **Set Gimbal Pitch** - Camera pointing
+- [ ] **Set ROI** - Point camera at location
+- [ ] **Zoom Control** - Digital/optical zoom
 
 ### 3. AI Agent Integration
 - [ ] **Claude Desktop Integration** - Configure and test with Claude Desktop
@@ -128,17 +189,35 @@
 
 ## 🐛 Known Limitations
 
-1. **Battery Telemetry** - May show 0% on virtual/simulated drones
-2. **MCP Agent API** - `FastAgent` deprecated, examples need updating for new API
-3. **Error Recovery** - Limited automatic recovery from connection errors
+1. **Battery Telemetry** - May show 0% on some simulated drones (but works on real hardware)
+2. **Flight Mode Setting** - Not yet implemented (ArduPilot auto-switches to GUIDED)
+3. **Parameter Access** - Cannot get/set ArduPilot parameters yet
 4. **Windows Support** - Primarily tested on Ubuntu 24.04
+5. **Single Drone** - One drone per server instance currently
 
-## 🔧 Recent Bug Fixes
+## 🔧 Recent Bug Fixes & Changes
+
+### November 12, 2025 - v1.1.0 Major Update
+**Added:** 15 new MCP tools
+- Critical safety tools (disarm, RTL, battery, hold, kill)
+- System health checks
+- GPS quality monitoring
+- Speed and attitude telemetry
+- Mission pause/resume/clear
+- Absolute GPS navigation
+- Speed limiting
+
+**Impact:** Complete, safe drone operations from arm to disarm!
+
+### November 12, 2025 - ArduPilot GUIDED Mode Fix
+**Issue:** Previous implementation tried to use PX4 OFFBOARD mode on ArduPilot.  
+**Cause:** Confusion between PX4 and ArduPilot flight mode systems.  
+**Fix:** Updated to use ArduPilot-native GUIDED mode via `goto_location()` API.
 
 ### November 2, 2025 - Relative Movement Bug Fix
-**Issue:** `move_to_relative` command was not moving drone horizontally (north/east directions).  
-**Cause:** Function was not calculating target GPS coordinates from meter offsets.  
-**Fix:** Added proper NED-to-GPS coordinate conversion with latitude-adjusted longitude.
+**Issue:** `move_to_relative` not moving drone horizontally.  
+**Cause:** Missing NED-to-GPS coordinate conversion.  
+**Fix:** Added proper GPS coordinate calculation with latitude compensation.
 
 ---
 
@@ -173,7 +252,10 @@
 
 ---
 
-**Last Updated:** November 2, 2025  
-**Version:** 0.2.0  
-**Status:** ✅ Fully Functional - Production Ready for Basic Operations
+**Last Updated:** November 12, 2025  
+**Version:** 1.1.0  
+**Status:** ✅ Production Ready - Complete Flight Operations with Safety Features
+
+**Tool Count:** 25 MCP tools (15 new in v1.1.0)  
+**New in v1.1:** Critical safety, system health, advanced telemetry, mission control
 

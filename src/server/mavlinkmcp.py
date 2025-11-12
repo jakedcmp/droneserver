@@ -525,6 +525,648 @@ async def get_flight_mode(ctx: Context) -> dict:
         logger.error("Failed to retrieve flight mode")
         return {"status": "failed", "error": "Failed to retrieve flight mode"}
 
+# ============================================================================
+# PRIORITY 1: CRITICAL SAFETY TOOLS (v1.1.0)
+# ============================================================================
+
+@mcp.tool()
+async def disarm_drone(ctx: Context) -> dict:
+    """
+    Disarm the drone motors. This stops the motors from spinning.
+    SAFETY: Only use when drone is on the ground!
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Disarming drone")
+    
+    try:
+        await drone.action.disarm()
+        return {"status": "success", "message": "Drone disarmed - motors stopped"}
+    except Exception as e:
+        logger.error(f"Failed to disarm: {e}")
+        return {"status": "failed", "error": f"Disarm failed: {str(e)}"}
+
+@mcp.tool()
+async def return_to_launch(ctx: Context) -> dict:
+    """
+    Command the drone to return to its launch/home position (RTL mode).
+    This is the primary emergency/safety feature.
+    The drone will fly back to home and land automatically.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Initiating Return to Launch (RTL)")
+    
+    try:
+        await drone.action.return_to_launch()
+        return {"status": "success", "message": "Return to Launch initiated - drone returning home"}
+    except Exception as e:
+        logger.error(f"RTL failed: {e}")
+        return {"status": "failed", "error": f"Return to Launch failed: {str(e)}"}
+
+@mcp.tool()
+async def kill_motors(ctx: Context) -> dict:
+    """
+    EMERGENCY ONLY: Immediately cut power to all motors.
+    ⚠️  WARNING: This will cause the drone to fall from the sky!
+    ⚠️  Only use in critical emergencies (fire, collision imminent, etc.)
+    ⚠️  Drone may be damaged from the fall!
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.warning("⚠️  EMERGENCY MOTOR KILL ACTIVATED ⚠️")
+    
+    try:
+        await drone.action.kill()
+        return {
+            "status": "success", 
+            "message": "EMERGENCY: Motors killed - drone will fall!",
+            "warning": "This is an emergency action. Drone may be damaged."
+        }
+    except Exception as e:
+        logger.error(f"Motor kill failed: {e}")
+        return {"status": "failed", "error": f"Motor kill failed: {str(e)}"}
+
+@mcp.tool()
+async def hold_position(ctx: Context) -> dict:
+    """
+    Command the drone to hold its current position (loiter/hover mode).
+    Useful for pausing during flight to assess situation or wait.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Commanding drone to hold position")
+    
+    try:
+        await drone.action.hold()
+        return {"status": "success", "message": "Drone holding position (hovering/loitering)"}
+    except Exception as e:
+        logger.error(f"Hold position failed: {e}")
+        return {"status": "failed", "error": f"Hold position failed: {str(e)}"}
+
+@mcp.tool()
+async def get_battery(ctx: Context) -> dict:
+    """
+    Get the current battery status including voltage and remaining percentage.
+    Critical for monitoring flight time and knowing when to land.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Battery voltage (V), remaining percentage (%), and status.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching battery status")
+    
+    try:
+        async for battery in drone.telemetry.battery():
+            battery_data = {
+                "voltage_v": battery.voltage_v,
+                "remaining_percent": battery.remaining_percent * 100,  # Convert to percentage
+            }
+            
+            # Add warning if battery is low
+            if battery.remaining_percent < 0.20:
+                battery_data["warning"] = "⚠️  LOW BATTERY - Land soon!"
+            elif battery.remaining_percent < 0.30:
+                battery_data["warning"] = "Battery getting low - consider landing"
+            
+            logger.info(f"Battery: {battery_data['voltage_v']:.2f}V, {battery_data['remaining_percent']:.1f}%")
+            return {"status": "success", "battery": battery_data}
+    except Exception as e:
+        logger.error(f"Failed to get battery status: {e}")
+        return {"status": "failed", "error": f"Battery read failed: {str(e)}"}
+
+# ============================================================================
+# PRIORITY 2: FLIGHT MODE MANAGEMENT & SYSTEM HEALTH (v1.1.0)
+# ============================================================================
+
+@mcp.tool()
+async def get_health(ctx: Context) -> dict:
+    """
+    Get comprehensive system health status for pre-flight checks.
+    Returns status of GPS, accelerometer, gyro, magnetometer, and more.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Comprehensive health status of all drone subsystems.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching system health")
+    
+    try:
+        async for health in drone.telemetry.health():
+            health_data = {
+                "is_gyrometer_calibrated": health.is_gyrometer_calibration_ok,
+                "is_accelerometer_calibrated": health.is_accelerometer_calibration_ok,
+                "is_magnetometer_calibrated": health.is_magnetometer_calibration_ok,
+                "is_local_position_ok": health.is_local_position_ok,
+                "is_global_position_ok": health.is_global_position_ok,
+                "is_home_position_ok": health.is_home_position_ok,
+                "is_armable": health.is_armable,
+            }
+            
+            # Add overall health assessment
+            all_ok = all(health_data.values())
+            health_data["overall_status"] = "HEALTHY" if all_ok else "ISSUES DETECTED"
+            
+            # Add warnings for critical issues
+            warnings = []
+            if not health.is_global_position_ok:
+                warnings.append("⚠️  No GPS lock - cannot fly safely!")
+            if not health.is_armable:
+                warnings.append("⚠️  Drone is not armable - check for errors")
+            if not health.is_gyrometer_calibration_ok:
+                warnings.append("Gyroscope needs calibration")
+            if not health.is_accelerometer_calibration_ok:
+                warnings.append("Accelerometer needs calibration")
+            if not health.is_magnetometer_calibration_ok:
+                warnings.append("Magnetometer/compass needs calibration")
+            
+            if warnings:
+                health_data["warnings"] = warnings
+            
+            logger.info(f"System health: {health_data['overall_status']}")
+            return {"status": "success", "health": health_data}
+    except Exception as e:
+        logger.error(f"Failed to get health status: {e}")
+        return {"status": "failed", "error": f"Health check failed: {str(e)}"}
+
+@mcp.tool()
+async def pause_mission(ctx: Context) -> dict:
+    """
+    Pause the currently executing mission.
+    The drone will hold its position. Use resume_mission to continue.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Pausing mission")
+    
+    try:
+        await drone.mission.pause_mission()
+        return {"status": "success", "message": "Mission paused - use resume_mission to continue"}
+    except Exception as e:
+        logger.error(f"Failed to pause mission: {e}")
+        return {"status": "failed", "error": f"Mission pause failed: {str(e)}"}
+
+@mcp.tool()
+async def resume_mission(ctx: Context) -> dict:
+    """
+    Resume a previously paused mission.
+    The drone will continue from where it was paused.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Resuming mission")
+    
+    try:
+        await drone.mission.start_mission()
+        return {"status": "success", "message": "Mission resumed"}
+    except Exception as e:
+        logger.error(f"Failed to resume mission: {e}")
+        return {"status": "failed", "error": f"Mission resume failed: {str(e)}"}
+
+@mcp.tool()
+async def clear_mission(ctx: Context) -> dict:
+    """
+    Clear the current mission from the drone.
+    Removes all uploaded waypoints.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Clearing mission")
+    
+    try:
+        await drone.mission.clear_mission()
+        return {"status": "success", "message": "Mission cleared - all waypoints removed"}
+    except Exception as e:
+        logger.error(f"Failed to clear mission: {e}")
+        return {"status": "failed", "error": f"Mission clear failed: {str(e)}"}
+
+# ============================================================================
+# PRIORITY 3: NAVIGATION ENHANCEMENTS (v1.1.0)
+# ============================================================================
+
+@mcp.tool()
+async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float, 
+                        absolute_altitude_m: float, yaw_deg: float = float('nan')) -> dict:
+    """
+    Fly to an absolute GPS location with specified altitude.
+    This is direct waypoint navigation to specific coordinates.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        latitude_deg (float): Target latitude in degrees (-90 to +90).
+        longitude_deg (float): Target longitude in degrees (-180 to +180).
+        absolute_altitude_m (float): Target altitude in meters above sea level (MSL).
+        yaw_deg (float): Target yaw/heading in degrees (optional, default: maintain current heading).
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    # Validate coordinates
+    if not (-90 <= latitude_deg <= 90):
+        return {"status": "failed", "error": f"Invalid latitude: {latitude_deg}. Must be between -90 and 90."}
+    if not (-180 <= longitude_deg <= 180):
+        return {"status": "failed", "error": f"Invalid longitude: {longitude_deg}. Must be between -180 and 180."}
+    
+    drone = connector.drone
+    logger.info(f"Flying to GPS location: {latitude_deg}, {longitude_deg} at {absolute_altitude_m}m MSL")
+    
+    try:
+        await drone.action.goto_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg)
+        return {
+            "status": "success", 
+            "message": f"Flying to location",
+            "target": {
+                "latitude": latitude_deg,
+                "longitude": longitude_deg,
+                "altitude_msl": absolute_altitude_m,
+                "yaw": yaw_deg if not math.isnan(yaw_deg) else "maintain current"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Go to location failed: {e}")
+        return {"status": "failed", "error": f"Navigation failed: {str(e)}"}
+
+@mcp.tool()
+async def get_home_position(ctx: Context) -> dict:
+    """
+    Get the home position where Return to Launch (RTL) will return to.
+    This is typically set at the launch location when the drone first arms.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Home position coordinates and altitude.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching home position")
+    
+    try:
+        async for home in drone.telemetry.home():
+            home_data = {
+                "latitude_deg": home.latitude_deg,
+                "longitude_deg": home.longitude_deg,
+                "absolute_altitude_m": home.absolute_altitude_m,
+            }
+            logger.info(f"Home position: {home_data['latitude_deg']}, {home_data['longitude_deg']} at {home_data['absolute_altitude_m']}m")
+            return {"status": "success", "home": home_data}
+    except Exception as e:
+        logger.error(f"Failed to get home position: {e}")
+        return {"status": "failed", "error": f"Home position read failed: {str(e)}"}
+
+@mcp.tool()
+async def set_max_speed(ctx: Context, speed_m_s: float) -> dict:
+    """
+    Set the maximum speed limit for the drone.
+    Useful for safety or when flying in confined areas.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        speed_m_s (float): Maximum speed in meters per second. Typical range: 1-20 m/s.
+
+    Returns:
+        dict: Status message with success or error.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    # Validate speed
+    if speed_m_s <= 0:
+        return {"status": "failed", "error": f"Invalid speed: {speed_m_s}. Must be positive."}
+    if speed_m_s > 30:
+        return {"status": "failed", "error": f"Speed too high: {speed_m_s} m/s. Maximum is 30 m/s for safety."}
+    
+    drone = connector.drone
+    logger.info(f"Setting maximum speed to {speed_m_s} m/s")
+    
+    try:
+        await drone.action.set_maximum_speed(speed_m_s)
+        return {
+            "status": "success", 
+            "message": f"Maximum speed set to {speed_m_s} m/s",
+            "speed_kmh": round(speed_m_s * 3.6, 1)  # Also provide in km/h
+        }
+    except Exception as e:
+        logger.error(f"Failed to set max speed: {e}")
+        return {"status": "failed", "error": f"Set max speed failed: {str(e)}"}
+
+# ============================================================================
+# PRIORITY 4: TELEMETRY & MONITORING (v1.1.0)
+# ============================================================================
+
+@mcp.tool()
+async def get_speed(ctx: Context) -> dict:
+    """
+    Get the current ground speed (velocity over ground).
+    Returns velocity in North, East, Down directions.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Current velocity in NED frame and total ground speed.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching ground speed")
+    
+    try:
+        async for velocity in drone.telemetry.velocity_ned():
+            # Calculate total ground speed (horizontal speed only)
+            ground_speed_m_s = math.sqrt(velocity.north_m_s**2 + velocity.east_m_s**2)
+            
+            speed_data = {
+                "north_m_s": velocity.north_m_s,
+                "east_m_s": velocity.east_m_s,
+                "down_m_s": velocity.down_m_s,
+                "ground_speed_m_s": round(ground_speed_m_s, 2),
+                "ground_speed_kmh": round(ground_speed_m_s * 3.6, 2),
+            }
+            
+            logger.info(f"Ground speed: {speed_data['ground_speed_m_s']} m/s ({speed_data['ground_speed_kmh']} km/h)")
+            return {"status": "success", "velocity": speed_data}
+    except Exception as e:
+        logger.error(f"Failed to get speed: {e}")
+        return {"status": "failed", "error": f"Speed read failed: {str(e)}"}
+
+@mcp.tool()
+async def get_attitude(ctx: Context) -> dict:
+    """
+    Get the current attitude (orientation) of the drone.
+    Returns roll, pitch, and yaw angles in degrees.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Roll, pitch, yaw angles in degrees.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching attitude")
+    
+    try:
+        async for attitude in drone.telemetry.attitude_euler():
+            attitude_data = {
+                "roll_deg": round(attitude.roll_deg, 2),
+                "pitch_deg": round(attitude.pitch_deg, 2),
+                "yaw_deg": round(attitude.yaw_deg, 2),
+            }
+            
+            logger.info(f"Attitude: roll={attitude_data['roll_deg']}°, pitch={attitude_data['pitch_deg']}°, yaw={attitude_data['yaw_deg']}°")
+            return {"status": "success", "attitude": attitude_data}
+    except Exception as e:
+        logger.error(f"Failed to get attitude: {e}")
+        return {"status": "failed", "error": f"Attitude read failed: {str(e)}"}
+
+@mcp.tool()
+async def get_gps_info(ctx: Context) -> dict:
+    """
+    Get detailed GPS information including number of satellites and fix type.
+    Important for assessing navigation quality.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: GPS satellite count, fix type, and quality metrics.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Fetching GPS info")
+    
+    try:
+        async for gps_info in drone.telemetry.gps_info():
+            gps_data = {
+                "num_satellites": gps_info.num_satellites,
+                "fix_type": str(gps_info.fix_type),
+            }
+            
+            # Add quality assessment
+            if gps_info.num_satellites >= 10:
+                gps_data["quality"] = "Excellent"
+            elif gps_info.num_satellites >= 6:
+                gps_data["quality"] = "Good"
+            elif gps_info.num_satellites >= 4:
+                gps_data["quality"] = "Marginal"
+            else:
+                gps_data["quality"] = "Poor"
+                gps_data["warning"] = "⚠️  Insufficient satellites for reliable navigation!"
+            
+            logger.info(f"GPS: {gps_data['num_satellites']} satellites, {gps_data['fix_type']}, {gps_data['quality']}")
+            return {"status": "success", "gps": gps_data}
+    except Exception as e:
+        logger.error(f"Failed to get GPS info: {e}")
+        return {"status": "failed", "error": f"GPS info read failed: {str(e)}"}
+
+@mcp.tool()
+async def get_in_air(ctx: Context) -> dict:
+    """
+    Check if the drone is currently in the air (flying) or on the ground.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Boolean indicating if drone is airborne.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Checking if drone is in air")
+    
+    try:
+        async for in_air in drone.telemetry.in_air():
+            status_text = "IN AIR (flying)" if in_air else "ON GROUND"
+            logger.info(f"Drone status: {status_text}")
+            return {
+                "status": "success", 
+                "in_air": in_air,
+                "status_text": status_text
+            }
+    except Exception as e:
+        logger.error(f"Failed to check in_air status: {e}")
+        return {"status": "failed", "error": f"In-air check failed: {str(e)}"}
+
+@mcp.tool()
+async def get_armed(ctx: Context) -> dict:
+    """
+    Check if the drone is currently armed (motors can spin).
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Boolean indicating if drone is armed.
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Checking if drone is armed")
+    
+    try:
+        async for armed in drone.telemetry.armed():
+            status_text = "ARMED (motors ready)" if armed else "DISARMED (motors off)"
+            logger.info(f"Drone status: {status_text}")
+            return {
+                "status": "success", 
+                "armed": armed,
+                "status_text": status_text
+            }
+    except Exception as e:
+        logger.error(f"Failed to check armed status: {e}")
+        return {"status": "failed", "error": f"Armed check failed: {str(e)}"}
+
 
 if __name__ == "__main__":
     # Run the server
