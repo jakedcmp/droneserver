@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from typing import Tuple
 from mavsdk import System
 from mavsdk.mission import MissionItem, MissionPlan
+from mavsdk.offboard import OffboardError, PositionNedYaw
 import asyncio
 import os
 import logging
@@ -29,8 +30,6 @@ logger.addHandler(handler)
 class MAVLinkConnector:
     drone: System
     connection_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    # Track if we're in GUIDED mode for ArduPilot
-    in_guided_mode: bool = False
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -205,6 +204,7 @@ async def get_position(ctx: Context) -> dict:
         logger.error(f"Failed to retrieve position: {e}")
         return {"status": "failed", "error": str(e)}
 
+<<<<<<< HEAD
 async def ensure_guided_mode(connector: MAVLinkConnector) -> bool:
     """
     Ensure the drone is in GUIDED mode (ArduPilot's external control mode).
@@ -287,11 +287,14 @@ async def ensure_guided_mode(connector: MAVLinkConnector) -> bool:
         connector.in_guided_mode = False
         return False
 
+=======
+>>>>>>> 3854d4a (Fix CRITICAL: Restore MAVSDK offboard API for drone movement)
 @mcp.tool()
 async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: float, yaw_deg: float = 0.0) -> dict:
     """
-    Move the drone relative to the current position using ArduPilot's GUIDED mode.
-    The drone must be armed. Waits for connection if not ready.
+    Move the drone relative to the current position using MAVSDK offboard mode.
+    Works with both PX4 and ArduPilot drones. The drone must be armed and in the air.
+    Waits for connection if not ready.
 
     Args:
         ctx (Context): the context.
@@ -311,20 +314,21 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
     
     drone = connector.drone
 
-    # Ensure we're in GUIDED mode (ArduPilot's external control mode)
-    if not await ensure_guided_mode(connector):
-        return {"status": "failed", "error": "Failed to activate GUIDED mode"}
-
     try:
+<<<<<<< HEAD
         # Get current position
         position = await drone.telemetry.position().__anext__()
         current_lat = position.latitude_deg
         current_lon = position.longitude_deg
         current_alt = position.relative_altitude_m
+=======
+        logger.info(f"Setting offboard mode for relative movement: north={north_m}m, east={east_m}m, down={down_m}m")
+>>>>>>> 3854d4a (Fix CRITICAL: Restore MAVSDK offboard API for drone movement)
         
-        # Calculate target altitude (down is positive in NED, so negate)
-        target_alt = current_alt - down_m
+        # Start offboard mode with initial position
+        await drone.offboard.set_position_ned(PositionNedYaw(north_m, east_m, down_m, yaw_deg))
         
+<<<<<<< HEAD
         # Convert NED offsets (meters) to lat/lon offsets (degrees)
         # Earth radius in meters (approximate)
         EARTH_RADIUS = 6371000.0
@@ -364,6 +368,25 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
                 "altitude_m": target_alt
             }
         }
+=======
+        try:
+            await drone.offboard.start()
+            logger.info("✓ Offboard mode started")
+        except OffboardError as error:
+            if "COMMAND_DENIED" in str(error):
+                logger.info("Drone already in offboard mode, continuing")
+            else:
+                raise
+        
+        # Hold position for a moment
+        await asyncio.sleep(0.5)
+        
+        # Send the movement command again to ensure it's processed
+        await drone.offboard.set_position_ned(PositionNedYaw(north_m, east_m, down_m, yaw_deg))
+        
+        logger.info("✓ Movement command sent successfully")
+        return {"status": "success", "message": f"Moving: north={north_m}m, east={east_m}m, down={down_m}m, yaw={yaw_deg}°"}
+>>>>>>> 3854d4a (Fix CRITICAL: Restore MAVSDK offboard API for drone movement)
         
     except Exception as e:
         logger.error(f"Failed to execute relative movement: {e}")
