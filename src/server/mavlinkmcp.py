@@ -236,7 +236,8 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         position = await drone.telemetry.position().__anext__()
         current_lat = position.latitude_deg
         current_lon = position.longitude_deg
-        current_alt = position.relative_altitude_m
+        # IMPORTANT: goto_location() requires ABSOLUTE altitude (MSL), not relative!
+        current_alt = position.absolute_altitude_m
         
         # Calculate target altitude (down is positive in NED, so negate)
         target_alt = current_alt - down_m
@@ -258,9 +259,10 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         target_lon = current_lon + lon_offset_deg
         
         logger.info(f"Moving in GUIDED mode:")
-        logger.info(f"  Current: {current_lat:.6f}°, {current_lon:.6f}°, {current_alt:.1f}m")
+        logger.info(f"  Current: {current_lat:.6f}°, {current_lon:.6f}°")
+        logger.info(f"  Altitude: {current_alt:.1f}m MSL (absolute) | {position.relative_altitude_m:.1f}m AGL (relative)")
         logger.info(f"  Offset: north={north_m:.1f}m, east={east_m:.1f}m, down={down_m:.1f}m")
-        logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_alt:.1f}m")
+        logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_alt:.1f}m MSL")
         
         # Use goto_location with calculated target coordinates
         await drone.action.goto_location(
