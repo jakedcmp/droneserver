@@ -139,14 +139,25 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
     """Manage application lifecycle - returns global persistent connector"""
-    # Get or create the global connector (only happens once)
-    connector = await get_or_create_global_connector()
+    logger.info("=" * 60)
+    logger.info("🚀 LIFESPAN: Starting application lifespan...")
+    logger.info("=" * 60)
     
-    # Just yield the global connector - no teardown per request!
-    yield connector
+    try:
+        # Get or create the global connector (only happens once)
+        logger.info("LIFESPAN: Calling get_or_create_global_connector()...")
+        connector = await get_or_create_global_connector()
+        logger.info("LIFESPAN: Connector created successfully!")
+        
+        # Just yield the global connector - no teardown per request!
+        yield connector
+    except Exception as e:
+        logger.error("❌ LIFESPAN ERROR: %s", str(e), exc_info=True)
+        raise
     
     # Note: cleanup only happens on server shutdown (not per request)
     # In HTTP mode, this might not be called at all until process termination
+    logger.info("LIFESPAN: Shutting down...")
 
 # Pass lifespan to server
 mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
