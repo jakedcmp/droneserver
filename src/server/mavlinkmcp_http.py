@@ -47,11 +47,20 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     
     # Import the mcp instance with all tools registered
-    from src.server.mavlinkmcp import mcp
+    from src.server.mavlinkmcp import mcp, initialize_drone_connection
+    import asyncio
     
     # Update settings on the existing mcp instance
     mcp.settings.host = HOST
     mcp.settings.port = PORT
+    
+    # Add startup event to initialize drone connection
+    @mcp._app.on_event("startup")
+    async def startup_event():
+        """Initialize drone connection when server starts"""
+        logger.info("🔧 Server startup event triggered - initializing drone connection...")
+        # Schedule the initialization in the background
+        asyncio.create_task(initialize_drone_connection())
     
     # Run server with SSE transport using default mount path
     mcp.run(transport='sse')

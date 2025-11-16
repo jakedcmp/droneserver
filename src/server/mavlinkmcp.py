@@ -163,6 +163,24 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
 mcp = FastMCP("MAVLink MCP", lifespan=app_lifespan)
 
 
+# ============================================================
+# Startup Hook for SSE Mode
+# ============================================================
+async def initialize_drone_connection():
+    """
+    Initialize the global drone connection.
+    Call this from mavlinkmcp_http.py after the server starts.
+    """
+    logger.info("=" * 60)
+    logger.info("🚀 STARTUP: Initializing drone connection...")
+    logger.info("=" * 60)
+    try:
+        await get_or_create_global_connector()
+        logger.info("✓ Drone connection initialization complete!")
+    except Exception as e:
+        logger.error("❌ Failed to initialize drone connection: %s", str(e), exc_info=True)
+
+
 # ARM
 @mcp.tool()
 async def arm_drone(ctx: Context) -> dict:
