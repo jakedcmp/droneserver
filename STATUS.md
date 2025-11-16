@@ -1,18 +1,18 @@
 # MAVLink MCP - Project Status & Roadmap
 
-## ✅ Current Status (v1.2.0 - In Development)
+## ✅ Current Status (v1.2.0 - Near Complete)
 
-### Production Ready with Parameter Management
-The MAVLink MCP Server is **production-ready** with complete flight operations, safety features, and parameter management.
+### Production Ready with Advanced Features
+The MAVLink MCP Server is **production-ready** with complete flight operations, safety features, parameter management, advanced navigation, and mission enhancements.
 
 **Last Updated:** November 16, 2025  
-**Version:** 1.2.0 (in development)  
-**Total Tools:** 28 MCP tools (3 new)  
+**Version:** 1.2.0 (near complete)  
+**Total Tools:** 35 MCP tools (+10 from v1.1.0)  
 **Tested With:** ArduPilot, ChatGPT Developer Mode
 
 ---
 
-## 🎯 Available Tools (28 Total)
+## 🎯 Available Tools (35 Total)
 
 ### Basic Flight Control (5 tools)
 - ✅ `arm_drone` - Arm motors for flight
@@ -26,19 +26,26 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 - ✅ `kill_motors` - Emergency motor cutoff ⚠️
 - ✅ `get_battery` - Battery voltage & percentage monitoring
 
-### Navigation (5 tools)
+### Navigation (8 tools)
 - ✅ `get_position` - Current GPS coordinates & altitude
 - ✅ `move_to_relative` - Relative NED movement
 - ✅ `go_to_location` - Absolute GPS navigation
 - ✅ `get_home_position` - Home/RTL location
 - ✅ `set_max_speed` - Speed limiting for safety
+- ✅ `orbit_location` - **NEW** Circle around a point
+- ✅ `set_yaw` - **NEW** Set heading without moving
+- ✅ `reposition` - **NEW** Move to location and loiter
 
-### Mission Management (5 tools)
+### Mission Management (9 tools)
 - ✅ `initiate_mission` - Upload and start waypoint missions
 - ✅ `print_mission_progress` - Mission status monitoring
 - ✅ `pause_mission` - Pause current mission
 - ✅ `resume_mission` - Resume paused mission
 - ✅ `clear_mission` - Remove all waypoints
+- ✅ `upload_mission` - **NEW** Upload mission without starting
+- ✅ `download_mission` - **NEW** Retrieve mission from drone
+- ✅ `set_current_waypoint` - **NEW** Jump to specific waypoint
+- ✅ `is_mission_finished` - **NEW** Check mission completion
 
 ### Telemetry & Monitoring (7 tools)
 - ✅ `get_flight_mode` - Current flight mode
@@ -120,17 +127,16 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 - ✅ `set_parameter` - Write drone parameters (implemented Nov 16, 2025)
 - ✅ `list_parameters` - List all available parameters (implemented Nov 16, 2025)
 
-#### Advanced Navigation
-- [ ] `land_at_location` - Land at specific GPS coordinates
-- [ ] `orbit_location` - Circle around a point
-- [ ] `set_yaw` - Set heading without moving
-- [ ] `reposition` - Move to location and loiter
+#### Advanced Navigation ✅ COMPLETE
+- ✅ `orbit_location` - Circle around a point (implemented Nov 16, 2025)
+- ✅ `set_yaw` - Set heading without moving (implemented Nov 16, 2025)
+- ✅ `reposition` - Move to location and loiter (implemented Nov 16, 2025)
 
-#### Mission Enhancements
-- [ ] `upload_mission` - Upload mission without starting
-- [ ] `download_mission` - Get current mission from drone
-- [ ] `set_current_waypoint` - Jump to specific waypoint
-- [ ] `is_mission_finished` - Check mission completion status
+#### Mission Enhancements ✅ COMPLETE
+- ✅ `upload_mission` - Upload mission without starting (implemented Nov 16, 2025)
+- ✅ `download_mission` - Get current mission from drone (implemented Nov 16, 2025)
+- ✅ `set_current_waypoint` - Jump to specific waypoint (implemented Nov 16, 2025)
+- ✅ `is_mission_finished` - Check mission completion status (implemented Nov 16, 2025)
 
 **Estimated Time:** 3-4 weeks
 
@@ -208,14 +214,16 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 
 ## 📊 Version Comparison
 
-| Feature | v1.0.0 | v1.1.0 | v1.2.0 (In Dev) |
+| Feature | v1.0.0 | v1.1.0 | v1.2.0 (Near Complete) |
 |---------|--------|--------|------------------|
-| **Total Tools** | 10 | 25 | 28 (current) |
+| **Total Tools** | 10 | 25 | 35 (current) |
 | **Safety Tools** | 1 | 5 | 5 |
 | **Complete Flight Cycle** | ❌ | ✅ | ✅ |
 | **Emergency Procedures** | ❌ | ✅ | ✅ |
 | **Battery Monitoring** | ❌ | ✅ | ✅ |
 | **Parameter Access** | ❌ | ❌ | ✅ **NEW** |
+| **Advanced Navigation** | ❌ | ❌ | ✅ **NEW** |
+| **Mission Enhancements** | Basic | Basic | Advanced ✅ |
 | **Production Ready** | ❌ | ✅ | ✅ |
 
 ---
@@ -245,19 +253,27 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 
 ## 🔧 Recent Changes
 
+### November 16, 2025 - v1.2.0 Development: Advanced Navigation & Mission Enhancements ✅
+**Added:** 7 new tools for advanced flight control
+
+**Advanced Navigation (3 tools):**
+- `orbit_location` - Circle around a point at specified radius and speed
+- `set_yaw` - Rotate drone to face specific direction (with cardinal directions)
+- `reposition` - Move to location and loiter
+
+**Mission Enhancements (4 tools):**
+- `upload_mission` - Upload mission without auto-starting
+- `download_mission` - Retrieve mission from drone
+- `set_current_waypoint` - Jump to specific waypoint index
+- `is_mission_finished` - Check if mission completed
+
+**Status:** v1.2.0 nearly complete! 35 tools total (+10 from v1.1.0)
+
 ### November 16, 2025 - v1.2.0 Development: Parameter Management ✅
 **Added:** 3 new parameter management tools
 - `get_parameter` - Read any drone parameter with auto-type detection
 - `set_parameter` - Write parameters with safety warnings
 - `list_parameters` - List all parameters with optional filtering
-
-**Features:**
-- Auto-detect parameter types (int/float)
-- Filter parameters by prefix (e.g., "BATT" for battery params)
-- Safety warnings for parameter changes
-- Show old vs new values when setting params
-
-**Status:** Parameter Management complete! 28 tools total (+3 from v1.1.0)
 
 ### November 16, 2025 - Documentation Cleanup
 - Removed historical development notes
@@ -316,8 +332,8 @@ We welcome contributions! Priority areas:
 
 ---
 
-**Current Version:** v1.2.0 (in development)  
-**Status:** ✅ Production Ready + Parameter Management  
-**Next Milestone:** Advanced Navigation & Mission Enhancements  
+**Current Version:** v1.2.0 (near complete - 35 tools)  
+**Status:** ✅ Production Ready + Full Feature Set  
+**Next Release:** v1.3.0 (Intelligent Automation)  
 **Maintainer:** Peter J Burke  
 **Original Author:** Ion Gabriel

@@ -377,24 +377,24 @@ Start agent with auto-configuration:
 
 ## Available Tools
 
-The MCP server exposes **28 tools** for complete drone control:
+The MCP server exposes **35 tools** for complete drone control:
 
 | Category | Count | Key Tools |
 |----------|-------|-----------|
 | **Flight Control** | 5 | `arm_drone`, `disarm_drone`, `takeoff`, `land`, `hold_position` |
 | **Emergency & Safety** | 3 | `return_to_launch`, `kill_motors`, `get_battery` |
-| **Navigation** | 5 | `get_position`, `move_to_relative`, `go_to_location`, `set_max_speed` |
-| **Mission Management** | 5 | `initiate_mission`, `pause_mission`, `resume_mission`, `clear_mission` |
+| **Navigation** | 8 | `get_position`, `go_to_location`, `orbit_location` 🆕, `set_yaw` 🆕, `reposition` 🆕 |
+| **Mission Management** | 9 | `initiate_mission`, `upload_mission` 🆕, `download_mission` 🆕, `set_current_waypoint` 🆕 |
 | **Telemetry** | 7 | `get_health`, `get_speed`, `get_attitude`, `get_gps_info`, `get_armed` |
-| **Parameter Management** | 3 | `get_parameter`, `set_parameter`, `list_parameters` 🆕 |
+| **Parameter Management** | 3 | `get_parameter`, `set_parameter`, `list_parameters` |
 
 **See [STATUS.md](STATUS.md) for complete tool list and descriptions.**
 
 ### Recent Updates
+- ✅ **Nov 16, 2025**: v1.2.0 near complete - added 7 tools for advanced navigation & missions (orbit, yaw, reposition, mission mgmt)
 - ✅ **Nov 16, 2025**: v1.2.0 development - added 3 parameter management tools (get/set/list params)
 - ✅ **Nov 16, 2025**: Documentation cleanup - removed 4 redundant files, consolidated roadmap
 - ✅ **Nov 12, 2025**: v1.1.0 released with 15 new tools - critical safety features, health checks, advanced telemetry
-- ✅ **Nov 2, 2025**: Fixed `move_to_relative` for horizontal movement
 
 ## Configuration
 

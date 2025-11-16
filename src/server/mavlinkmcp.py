@@ -1434,6 +1434,476 @@ async def list_parameters(ctx: Context, filter_prefix: str = "") -> dict:
         logger.error(f"Failed to list parameters: {e}")
         return {"status": "failed", "error": f"Failed to retrieve parameters: {str(e)}"}
 
+# ============================================================================
+# v1.2.0: ADVANCED NAVIGATION
+# ============================================================================
+
+@mcp.tool()
+async def orbit_location(
+    ctx: Context, 
+    radius_m: float,
+    velocity_ms: float,
+    latitude_deg: float,
+    longitude_deg: float,
+    absolute_altitude_m: float,
+    clockwise: bool = True
+) -> dict:
+    """
+    Orbit around a specific GPS location at a given radius and speed.
+    Useful for inspections, aerial photography, or surveillance.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        radius_m (float): Orbit radius in meters (distance from center point).
+        velocity_ms (float): Orbit velocity in meters per second.
+        latitude_deg (float): Center point latitude in degrees.
+        longitude_deg (float): Center point longitude in degrees.
+        absolute_altitude_m (float): Altitude above sea level in meters.
+        clockwise (bool): Orbit direction - True for clockwise, False for counter-clockwise.
+
+    Returns:
+        dict: Status message with orbit parameters.
+    
+    Examples:
+        - orbit_location(20, 2, 33.645, -117.842, 50, True) - 20m radius orbit at 2 m/s
+        - orbit_location(50, 5, 33.645, -117.842, 100, False) - Large counter-clockwise orbit
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    # Validate inputs
+    if radius_m <= 0:
+        return {"status": "failed", "error": f"Invalid radius: {radius_m}m. Must be positive."}
+    if velocity_ms <= 0:
+        return {"status": "failed", "error": f"Invalid velocity: {velocity_ms} m/s. Must be positive."}
+    if not (-90 <= latitude_deg <= 90):
+        return {"status": "failed", "error": f"Invalid latitude: {latitude_deg}. Must be between -90 and 90."}
+    if not (-180 <= longitude_deg <= 180):
+        return {"status": "failed", "error": f"Invalid longitude: {longitude_deg}. Must be between -180 and 180."}
+    
+    drone = connector.drone
+    
+    # Import yaw behavior enum
+    from mavsdk.action import OrbitYawBehavior
+    yaw_behavior = OrbitYawBehavior.HOLD_FRONT_TO_CIRCLE_CENTER
+    
+    logger.info(f"Starting orbit: radius={radius_m}m, speed={velocity_ms}m/s, "
+                f"center=({latitude_deg}, {longitude_deg}), altitude={absolute_altitude_m}m, "
+                f"direction={'clockwise' if clockwise else 'counter-clockwise'}")
+    
+    try:
+        # Negative velocity for counter-clockwise
+        velocity = velocity_ms if clockwise else -velocity_ms
+        
+        await drone.action.do_orbit(
+            radius_m, 
+            velocity, 
+            yaw_behavior,
+            latitude_deg, 
+            longitude_deg, 
+            absolute_altitude_m
+        )
+        
+        return {
+            "status": "success",
+            "message": "Orbit started",
+            "parameters": {
+                "radius_m": radius_m,
+                "velocity_ms": velocity_ms,
+                "center_lat": latitude_deg,
+                "center_lon": longitude_deg,
+                "altitude_msl": absolute_altitude_m,
+                "direction": "clockwise" if clockwise else "counter-clockwise"
+            },
+            "note": "To stop orbit, use hold_position or send a new movement command"
+        }
+    except Exception as e:
+        logger.error(f"Orbit failed: {e}")
+        return {"status": "failed", "error": f"Orbit command failed: {str(e)}"}
+
+@mcp.tool()
+async def set_yaw(ctx: Context, yaw_deg: float, yaw_rate_deg_s: float = 30.0) -> dict:
+    """
+    Set the drone's heading (yaw) without changing position.
+    Rotates the drone to face a specific direction.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        yaw_deg (float): Target heading in degrees (0-360, where 0/360 is North).
+        yaw_rate_deg_s (float): Rotation speed in degrees per second (default: 30).
+
+    Returns:
+        dict: Status message with target heading.
+    
+    Examples:
+        - set_yaw(0) - Face North
+        - set_yaw(90) - Face East
+        - set_yaw(180) - Face South
+        - set_yaw(270) - Face West
+        - set_yaw(45, 15) - Face Northeast at 15 deg/s rotation speed
+    
+    Note:
+        - 0° = North, 90° = East, 180° = South, 270° = West
+        - Drone will rotate in place to face the specified direction
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    # Normalize yaw to 0-360
+    yaw_normalized = yaw_deg % 360
+    
+    # Validate yaw rate
+    if yaw_rate_deg_s <= 0:
+        return {"status": "failed", "error": f"Invalid yaw rate: {yaw_rate_deg_s}. Must be positive."}
+    
+    drone = connector.drone
+    logger.info(f"Setting yaw to {yaw_normalized}° at {yaw_rate_deg_s}°/s")
+    
+    try:
+        # Get current position to use goto_location with new yaw
+        async for position in drone.telemetry.position():
+            current_lat = position.latitude_deg
+            current_lon = position.longitude_deg
+            current_alt = position.absolute_altitude_m
+            
+            # Use goto_location with current position but new yaw
+            await drone.action.goto_location(
+                current_lat,
+                current_lon,
+                current_alt,
+                yaw_normalized
+            )
+            
+            # Convert heading to cardinal direction
+            directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+            direction_index = int((yaw_normalized + 22.5) / 45) % 8
+            cardinal = directions[direction_index]
+            
+            logger.info(f"✓ Yaw set to {yaw_normalized}° ({cardinal})")
+            
+            return {
+                "status": "success",
+                "message": f"Rotating to heading {yaw_normalized}°",
+                "yaw_degrees": yaw_normalized,
+                "cardinal_direction": cardinal,
+                "yaw_rate_deg_s": yaw_rate_deg_s
+            }
+    except Exception as e:
+        logger.error(f"Set yaw failed: {e}")
+        return {"status": "failed", "error": f"Yaw control failed: {str(e)}"}
+
+@mcp.tool()
+async def reposition(
+    ctx: Context,
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude_m: float
+) -> dict:
+    """
+    Move to a new location and loiter (hover) there.
+    Combination of goto_location and hold_position.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        latitude_deg (float): Target latitude in degrees.
+        longitude_deg (float): Target longitude in degrees.
+        altitude_m (float): Target altitude above sea level in meters.
+
+    Returns:
+        dict: Status message with target position.
+    
+    Examples:
+        - reposition(33.645, -117.842, 50) - Move to coordinates and hover at 50m
+        - reposition(33.646, -117.843, 100) - Reposition to new survey point
+    
+    Use Cases:
+        - Adjusting survey position
+        - Moving to better vantage point
+        - Relocating between tasks
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    # Validate coordinates
+    if not (-90 <= latitude_deg <= 90):
+        return {"status": "failed", "error": f"Invalid latitude: {latitude_deg}. Must be between -90 and 90."}
+    if not (-180 <= longitude_deg <= 180):
+        return {"status": "failed", "error": f"Invalid longitude: {longitude_deg}. Must be between -180 and 180."}
+    
+    drone = connector.drone
+    logger.info(f"Repositioning to ({latitude_deg}, {longitude_deg}) at {altitude_m}m")
+    
+    try:
+        # Move to new location (will loiter automatically in GUIDED mode)
+        await drone.action.goto_location(
+            latitude_deg,
+            longitude_deg,
+            altitude_m,
+            float('nan')  # Maintain current heading
+        )
+        
+        return {
+            "status": "success",
+            "message": "Repositioning to new location",
+            "target": {
+                "latitude": latitude_deg,
+                "longitude": longitude_deg,
+                "altitude_msl": altitude_m
+            },
+            "note": "Drone will fly to location and loiter (hover) there"
+        }
+    except Exception as e:
+        logger.error(f"Reposition failed: {e}")
+        return {"status": "failed", "error": f"Reposition failed: {str(e)}"}
+
+# ============================================================================
+# v1.2.0: MISSION ENHANCEMENTS
+# ============================================================================
+
+@mcp.tool()
+async def upload_mission(ctx: Context, waypoints: list) -> dict:
+    """
+    Upload a mission to the drone WITHOUT starting it.
+    Allows preparing missions in advance.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        waypoints (list): List of waypoint dictionaries with keys:
+                         - latitude_deg (float): Waypoint latitude
+                         - longitude_deg (float): Waypoint longitude
+                         - relative_altitude_m (float): Altitude above home
+                         - speed_m_s (float, optional): Speed to waypoint
+
+    Returns:
+        dict: Status message with mission summary.
+    
+    Examples:
+        waypoints = [
+            {"latitude_deg": 33.645, "longitude_deg": -117.842, "relative_altitude_m": 10},
+            {"latitude_deg": 33.646, "longitude_deg": -117.843, "relative_altitude_m": 15},
+            {"latitude_deg": 33.647, "longitude_deg": -117.844, "relative_altitude_m": 20}
+        ]
+        upload_mission(waypoints)
+    
+    Note:
+        - Mission is uploaded but NOT started automatically
+        - Use initiate_mission or start_mission to begin execution
+        - Clears any existing mission first
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    if not waypoints or len(waypoints) == 0:
+        return {"status": "failed", "error": "No waypoints provided. Mission must have at least one waypoint."}
+    
+    drone = connector.drone
+    logger.info(f"Uploading mission with {len(waypoints)} waypoints")
+    
+    try:
+        # Create mission items
+        mission_items = []
+        for i, wp in enumerate(waypoints):
+            if "latitude_deg" not in wp or "longitude_deg" not in wp or "relative_altitude_m" not in wp:
+                return {"status": "failed", "error": f"Waypoint {i} missing required fields (latitude_deg, longitude_deg, relative_altitude_m)"}
+            
+            mission_item = MissionItem(
+                wp["latitude_deg"],
+                wp["longitude_deg"],
+                wp["relative_altitude_m"],
+                wp.get("speed_m_s", float('nan')),
+                True,  # is_fly_through
+                float('nan'),  # gimbal_pitch_deg
+                float('nan'),  # gimbal_yaw_deg
+                MissionItem.CameraAction.NONE,
+                float('nan'),  # loiter_time_s
+                float('nan'),  # camera_photo_interval_s
+                float('nan'),  # acceptance_radius_m
+                float('nan'),  # yaw_deg
+                float('nan')   # camera_photo_distance_m
+            )
+            mission_items.append(mission_item)
+        
+        # Create mission plan
+        mission_plan = MissionPlan(mission_items)
+        
+        # Upload mission (does not start it)
+        await drone.mission.upload_mission(mission_plan)
+        
+        logger.info(f"✓ Mission uploaded successfully: {len(waypoints)} waypoints")
+        
+        return {
+            "status": "success",
+            "message": f"Mission uploaded with {len(waypoints)} waypoints",
+            "waypoint_count": len(waypoints),
+            "note": "Mission uploaded but NOT started. Use initiate_mission or print_mission_progress to start."
+        }
+    except Exception as e:
+        logger.error(f"Mission upload failed: {e}")
+        return {"status": "failed", "error": f"Mission upload failed: {str(e)}"}
+
+@mcp.tool()
+async def download_mission(ctx: Context) -> dict:
+    """
+    Download the current mission from the drone.
+    Retrieves all waypoints stored on the drone.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Mission data with all waypoints.
+    
+    Use Cases:
+        - Backup current mission
+        - Verify uploaded mission
+        - Check drone's planned route
+        - Mission debugging
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Downloading mission from drone")
+    
+    try:
+        mission_plan = await drone.mission.download_mission()
+        
+        # Convert mission items to dict format
+        waypoints = []
+        for item in mission_plan.mission_items:
+            waypoints.append({
+                "latitude_deg": item.latitude_deg,
+                "longitude_deg": item.longitude_deg,
+                "relative_altitude_m": item.relative_altitude_m,
+                "speed_m_s": item.speed_m_s if not math.isnan(item.speed_m_s) else None
+            })
+        
+        logger.info(f"✓ Downloaded mission with {len(waypoints)} waypoints")
+        
+        return {
+            "status": "success",
+            "waypoint_count": len(waypoints),
+            "waypoints": waypoints
+        }
+    except Exception as e:
+        logger.error(f"Mission download failed: {e}")
+        return {"status": "failed", "error": f"Mission download failed: {str(e)}"}
+
+@mcp.tool()
+async def set_current_waypoint(ctx: Context, waypoint_index: int) -> dict:
+    """
+    Jump to a specific waypoint in the current mission.
+    Allows skipping ahead or going back in a mission.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+        waypoint_index (int): Waypoint number to jump to (0-based index).
+
+    Returns:
+        dict: Status message with new current waypoint.
+    
+    Examples:
+        - set_current_waypoint(0) - Jump to first waypoint (restart mission)
+        - set_current_waypoint(5) - Skip to waypoint 5
+        - set_current_waypoint(3) - Go back to waypoint 3
+    
+    Use Cases:
+        - Skip completed waypoints
+        - Restart mission from beginning
+        - Re-survey specific area
+        - Mission recovery after interruption
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    if waypoint_index < 0:
+        return {"status": "failed", "error": f"Invalid waypoint index: {waypoint_index}. Must be 0 or greater."}
+    
+    drone = connector.drone
+    logger.info(f"Setting current mission waypoint to index {waypoint_index}")
+    
+    try:
+        await drone.mission.set_current_mission_item(waypoint_index)
+        
+        logger.info(f"✓ Current waypoint set to index {waypoint_index}")
+        
+        return {
+            "status": "success",
+            "message": f"Current waypoint set to index {waypoint_index}",
+            "waypoint_index": waypoint_index,
+            "note": "Mission will continue from this waypoint"
+        }
+    except Exception as e:
+        logger.error(f"Set current waypoint failed: {e}")
+        return {"status": "failed", "error": f"Set waypoint failed: {str(e)}"}
+
+@mcp.tool()
+async def is_mission_finished(ctx: Context) -> dict:
+    """
+    Check if the current mission has completed.
+    Returns true if all waypoints have been reached.
+    Waits for connection if not ready.
+
+    Args:
+        ctx (Context): The context of the request.
+
+    Returns:
+        dict: Boolean indicating if mission is finished.
+    
+    Use Cases:
+        - Monitor mission completion
+        - Trigger post-mission actions
+        - Mission automation
+        - Status monitoring
+    """
+    connector = ctx.request_context.lifespan_context
+    
+    # Wait for connection
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
+    
+    drone = connector.drone
+    logger.info("Checking if mission is finished")
+    
+    try:
+        finished = await drone.mission.is_mission_finished()
+        
+        status_text = "FINISHED" if finished else "IN PROGRESS"
+        logger.info(f"Mission status: {status_text}")
+        
+        return {
+            "status": "success",
+            "mission_finished": finished,
+            "status_text": status_text
+        }
+    except Exception as e:
+        logger.error(f"Check mission finished failed: {e}")
+        return {"status": "failed", "error": f"Mission status check failed: {str(e)}"}
+
 
 if __name__ == "__main__":
     # Run the server
