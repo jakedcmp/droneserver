@@ -1,0 +1,25 @@
+[Unit]
+Description=ngrok HTTPS Tunnel for MAVLink MCP Server
+After=network.target mavlinkmcp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+
+# Start ngrok tunnel on port 8080
+ExecStart=/usr/local/bin/ngrok http 8080 --log=stdout
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ngrok
+
+[Install]
+WantedBy=multi-user.target
+

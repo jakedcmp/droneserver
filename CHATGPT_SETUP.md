@@ -98,6 +98,20 @@ INFO - MCP Server is READY and exposing drone control tools
 
 **Keep this terminal running!** The server must stay active for ChatGPT to connect.
 
+### 🚀 Alternative: Run as systemd Service (Production)
+
+For production deployments, you can install the MCP server and ngrok as systemd services that auto-start on boot and restart on failure:
+
+```bash
+sudo ./install_services.sh
+sudo systemctl enable mavlinkmcp ngrok
+sudo systemctl start mavlinkmcp ngrok
+```
+
+This is recommended for persistent deployments. See **[SERVICE_SETUP.md](SERVICE_SETUP.md)** for complete instructions.
+
+If using services, skip to **Step 4** after installation.
+
 ---
 
 ## Step 3: Set Up HTTPS with ngrok (Required for ChatGPT)

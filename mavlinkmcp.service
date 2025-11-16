@@ -1,0 +1,29 @@
+[Unit]
+Description=MAVLink MCP Server - HTTP/SSE Mode for ChatGPT
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/MAVLinkMCP
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Start the MCP server
+ExecStart=/root/MAVLinkMCP/start_http_server.sh
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mavlinkmcp
+
+# Security hardening (optional)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+

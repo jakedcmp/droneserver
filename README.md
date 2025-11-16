@@ -38,6 +38,23 @@ ChatGPT: "Landing... 10m... 5m... 1m... Landed successfully!"
 
 📖 **[Complete ChatGPT Setup Guide →](CHATGPT_SETUP.md)**
 
+### 🚀 Production Deployment with systemd Services
+
+For production deployments, you can run the MCP server and ngrok as systemd services that:
+- ✅ **Auto-start on boot** - Server starts automatically when system boots
+- ✅ **Auto-restart on failure** - Automatically recovers from crashes
+- ✅ **Centralized logging** - View logs with `journalctl`
+- ✅ **Easy management** - Control with `systemctl` commands
+
+**Quick Install:**
+```bash
+sudo ./install_services.sh
+sudo systemctl enable mavlinkmcp ngrok
+sudo systemctl start mavlinkmcp ngrok
+```
+
+📖 **[Complete Service Setup Guide →](SERVICE_SETUP.md)**
+
 ---
 
 ## Prerequisites
