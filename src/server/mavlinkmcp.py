@@ -17,15 +17,22 @@ from pathlib import Path
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# Configure logger with enhanced format for both console and systemd
+# Configure logger with clean single-line format for systemd
 logger = logging.getLogger("MAVLinkMCP")
 logger.setLevel(logging.INFO)
 
-# Console handler (for direct terminal use)
+# Remove any existing handlers to avoid duplicates
+logger.handlers.clear()
+
+# Single-line format for clean journalctl output
 console_handler = logging.StreamHandler()
-console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Compact format: timestamp | level | message (no logger name, no multi-line)
+console_formatter = logging.Formatter('%(asctime)s | %(levelname)-7s | %(message)s', datefmt='%H:%M:%S')
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
+
+# Prevent propagation to avoid duplicate logs from parent loggers
+logger.propagate = False
 
 # Ensure output is unbuffered for systemd journalctl
 import sys
@@ -369,6 +376,7 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_alt:.1f}m MSL")
         
         # Use goto_location with calculated target coordinates
+        log_mavlink_cmd("drone.action.goto_location", lat=f"{target_lat:.6f}", lon=f"{target_lon:.6f}", alt=f"{target_alt:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
         await drone.action.goto_location(
             target_lat,
             target_lon,
@@ -598,8 +606,10 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     mission_plan = MissionPlan(mission_items)
 
     # Set return-to-launch behavior
+    log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=return_to_launch)
     await drone.mission.set_return_to_launch_after_mission(return_to_launch)
 
+    log_mavlink_cmd("drone.mission.upload_mission", waypoint_count=len(mission_items))
     logger.info("Uploading mission")
     await drone.mission.upload_mission(mission_plan)
 
@@ -1656,6 +1666,7 @@ async def list_parameters(ctx: Context, filter_prefix: str = "") -> dict:
     logger.info(f"Listing parameters{f' (filter: {filter_prefix}*)' if filter_prefix else ''}")
     
     try:
+        log_mavlink_cmd("drone.param.get_all_params", filter_prefix=filter_prefix if filter_prefix else "none")
         all_params = await drone.param.get_all_params()
         
         # Filter if prefix provided
