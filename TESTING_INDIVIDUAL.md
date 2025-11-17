@@ -71,33 +71,38 @@ Show me the first 10 parameters alphabetically
 
 ## 🚁 Advanced Navigation Tests
 
-### Test 4: Orbit Mode
+### Test 4: Multi-Point Navigation
 
 ```
 Arm the drone and takeoff to 20 meters
-Check our GPS position
-Orbit around our current location at 30 meter radius, 3 m/s, clockwise
-After 30 seconds, stop and hold position
-Check our speed to confirm we stopped
+Check our current GPS position - remember this as the starting point
+Fly to a position 30 meters north of current location
+Face east (90 degrees) and hold for 5 seconds
+Now fly to a position 30 meters east of starting point
+Face south (180 degrees) and hold for 5 seconds
+Return to starting GPS position
+Check our speed to confirm we're holding position
 Land and disarm
 ```
 
 **What it tests:**
-- ✅ `arm_drone` + `takeoff_drone`
+- ✅ `arm_drone` + `takeoff`
 - ✅ `get_position`
-- ✅ `orbit_location` - Circular flight pattern
-- ✅ `hold_position` - Stop orbit
+- ✅ `go_to_location` - Navigate to GPS coordinates
+- ✅ `set_yaw` - Face different directions (east, south)
+- ✅ `hold_position` - Hold at waypoints
 - ✅ `get_speed` - Verify stopped
-- ✅ `land_drone` + `disarm_drone`
+- ✅ `land` + `disarm_drone`
 
 **Expected result:** 
-- Drone orbits at 30m radius (or firmware reports not supported with workaround)
-- Speed during orbit: ~3 m/s
-- Speed after hold: < 1 m/s
+- Drone navigates to multiple GPS waypoints accurately
+- Yaw control rotates drone to face different directions
+- Speed at waypoints: < 1 m/s
+- Returns to starting position within 2m
 
 **Troubleshooting:**
-- "Command not supported" → Normal for ArduPilot < 4.0 or PX4 < 1.13
-- Error message should provide waypoint-based alternative
+- Poor GPS accuracy → May be off by a few meters (normal)
+- Check GPS has good lock (6+ satellites, 3D fix)
 
 ---
 
@@ -259,7 +264,7 @@ After running individual tests, verify:
 ### Advanced Navigation
 - [ ] `set_yaw` rotates to specified heading
 - [ ] `reposition` moves and holds new GPS location
-- [ ] `orbit_location` works OR provides firmware workaround
+- [ ] `go_to_location` navigates to GPS coordinates accurately
 - [ ] `get_attitude` confirms heading changes
 - [ ] `get_speed` tracks movement
 
@@ -287,7 +292,7 @@ After running individual tests, verify:
 - ✅ At least 2/3 tests pass
 - ✅ Yaw control works
 - ✅ Reposition works
-- ⚠️ Orbit may fail (firmware limitation) - informative error is OK
+- ⚠️ GPS accuracy may vary - 2-5m drift is normal
 
 ### Test 7-8 (Missions)
 - ✅ Both tests pass
@@ -315,7 +320,7 @@ BASE_LON = -117.8427
 ### Modify Test Parameters
 Common adjustments:
 - **Altitude:** Lower for indoor/small areas (5-10m), higher for outdoor (15-30m)
-- **Orbit radius:** Smaller for confined spaces (10-15m), larger for open areas (30-50m)
+- **Navigation distance:** Smaller for confined spaces (10-15m), larger for open areas (30-50m)
 - **Speed:** Slower for testing (1-2 m/s), normal for operations (3-5 m/s)
 
 ---
@@ -329,7 +334,7 @@ Common adjustments:
 - Have RC transmitter ready for manual override
 
 ⚠️ **During tests:**
-- Monitor altitude (especially during orbit)
+- Monitor altitude during navigation
 - Watch battery level
 - Stay within visual line of sight
 - Be ready to take manual control

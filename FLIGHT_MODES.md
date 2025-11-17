@@ -17,7 +17,6 @@ MAVLink MCP tools interact with ArduPilot, which automatically switches flight m
 - `hold_position` ✅ **FIXED - now stays in GUIDED**
 - `set_yaw`
 - `reposition`
-- `orbit_location`
 
 **Behavior:**
 - Drone accepts real-time position/velocity commands

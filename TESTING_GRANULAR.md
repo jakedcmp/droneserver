@@ -279,31 +279,25 @@ TEST 24: hold_position (verify hover stability)
 - NACK CRITERIA: Position changed > 5m (excessive drift)
 - Report: ACK/NACK (drift: Xm)
 
-TEST 25: orbit_location (circular movement)
+TEST 25: go_to_location (absolute GPS navigation)
 - PREREQUISITE: Drone in air (altitude > 10m)
 - ACTION: Get current GPS position
-- SAVE: Position as ORBIT_START
-- ACTION: Run orbit_location with:
-  * radius: 20 meters
-  * velocity: 2 m/s  
-  * center: current position
-  * altitude: 18m (absolute MSL - convert from relative if needed)
-  * clockwise: true
-- VERIFY: Command response
-- IF SUCCESS:
-  * WAIT: 15 seconds (should complete ~1/4 of circle at 2 m/s)
-  * ACTION: Run get_position
-  * ACTION: Run get_speed
-  * VERIFY: Drone is moving (speed > 1 m/s) AND position changed
-  * ACK CRITERIA: Speed between 1-4 m/s AND moved from ORBIT_START
-- IF ERROR "not supported":
-  * CHECK: Error message provides workaround or firmware info
-  * ACK CRITERIA: Helpful error with firmware requirements + alternative
-- NACK CRITERIA: Error without helpful message OR command succeeded but no movement
-- Report: ACK/NACK (supported: yes/no, if yes: speed Xm/s, moved: Xm)
+- SAVE: Position as NAV_START (lat, lon, alt)
+- ACTION: Calculate target 30m north: target_lat = current_lat + 0.00027
+- ACTION: Run go_to_location with:
+  * latitude: target_lat
+  * longitude: current_lon  
+  * altitude: current_alt (absolute MSL)
+  * yaw: NaN (maintain heading)
+- WAIT: 10 seconds for drone to reach waypoint
+- ACTION: Run get_position
+- ACTION: Calculate distance from target
+- ACK CRITERIA: Drone within 5m of target coordinates
+- NACK CRITERIA: Drone > 10m from target OR didn't move at all
+- Report: ACK/NACK (distance from target: Xm, moved: yes/no)
 
-TEST 26: hold_position (stop orbit/verify command interruption)
-- PREREQUISITE: Previous command executed (orbit or movement)
+TEST 26: hold_position (stop movement/verify command interruption)
+- PREREQUISITE: Previous command executed (any movement)
 - ACTION: Run hold_position
 - WAIT: 5 seconds
 - ACTION: Run get_speed
@@ -559,7 +553,7 @@ Please provide comprehensive report:
    Example:
    - TEST 15 | get_position | ACK | Altitude 11.8m (target 12m, error 0.2m) | ✓
    - TEST 19 | get_attitude | NACK | Yaw unchanged at 127° (target 0°) | Rotation failed
-   - TEST 25 | orbit_location | ACK | Not supported, helpful workaround provided | ✓
+   - TEST 25 | go_to_location | ACK | Reached target within 5m | ✓
 
 3. **Failed Tests Analysis:**
    For each NACK:
@@ -584,7 +578,7 @@ Please provide comprehensive report:
 7. **Production Readiness:**
    - Overall: YES/NO
    - Core flight control (arm, takeoff, move, land, disarm): X/10 ACK
-   - Navigation (yaw, reposition, orbit): X/3 ACK
+   - Navigation (yaw, reposition, go_to_location): X/3 ACK
    - Missions (upload, execute, control): X/11 ACK
    - Telemetry & monitoring: X/7 ACK
    - Safety & prerequisites: Effective? YES/NO
@@ -609,7 +603,7 @@ Please provide comprehensive report:
 - ✅ **Telemetry (7 tools)**: health, battery, GPS, position, speed, attitude, flight mode
 - ✅ **Parameters (3 tools)**: list, get, set + verification of persistence
 - ✅ **Flight Control (10 tools)**: arm, takeoff, move, hold, land, disarm, RTL
-- ✅ **Navigation (3 tools)**: set_yaw, reposition, orbit (with movement verification)
+- ✅ **Navigation (3 tools)**: set_yaw, reposition, go_to_location (with movement verification)
 - ✅ **Missions (11 tests)**: upload, download, start, pause, resume, progress, jump, clear
 - ✅ **Safety (4 checks)**: RTL, battery, pre-disarm altitude+speed, prerequisite gates
 

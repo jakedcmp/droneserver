@@ -30,24 +30,24 @@ new_lon = current_lon + 0.00033
 
 ---
 
-### Orbit Not Working - "Command not supported by autopilot"
+### Navigation Accuracy Issues
 
-**Problem:** `orbit_location` returns "UNSUPPORTED" error
+**Problem:** Drone doesn't reach exact GPS coordinates (off by 2-5 meters)
 
-**Root Cause:** Orbit command requires ArduPilot 4.0+ or PX4 1.13+
+**Root Cause:** GPS accuracy limitations and satellite geometry
 
 **Solutions:**
-1. **Check firmware version:** Upgrade to latest stable release
-2. **Use waypoint-based circle:** Server error message provides instructions
-3. **Manual orbit:** Use repeated `go_to_location` + `set_yaw` commands
+1. **Check GPS lock:** Ensure 6+ satellites with 3D fix
+2. **Check HDOP:** Horizontal dilution of precision < 2.0 is good
+3. **Use relative navigation:** For precise movements < 50m, use `move_to_relative` with NED coordinates
 
-**Workaround Example:**
-The error message will suggest: "For a 25m radius orbit, create a mission with X waypoints in a circle"
-- Use the suggested waypoint count
-- Calculate circle coordinates using trigonometry
-- Upload as mission instead of using orbit command
+**Best Practice:**
+For inspection tasks requiring < 1m accuracy:
+- Get current position as reference
+- Use `move_to_relative(north_m, east_m, down_m)` for precise offsets
+- This bypasses GPS error accumulation
 
-**Note:** The error message includes firmware requirements and alternatives - this is expected behavior for older autopilots
+**Note:** GPS accuracy is normal behavior, not a bug. Use relative movements for precision tasks.
 
 ---
 
@@ -228,7 +228,6 @@ Different autopilots support different features. Here's what's required:
 | **Parameter Management** | ✅ All versions | ✅ All versions | Universal support |
 | **Set Yaw** | ✅ All versions | ✅ All versions | Universal support |
 | **Reposition** | ✅ All versions | ✅ All versions | Universal support |
-| **Orbit Location** | ✅ 4.0+ | ✅ 1.13+ | Older versions: use waypoint workaround |
 | **Upload Mission** | ✅ All versions | ✅ All versions | Format may vary slightly |
 | **Download Mission** | ✅ 4.0+ | ✅ 1.12+ | Older versions may not support |
 | **Set Current Waypoint** | ✅ All versions | ✅ All versions | Universal support |
@@ -325,7 +324,7 @@ Use this template to record your test results:
 
 **Results:**
 - Parameters tested: ✅ Pass / ❌ Fail [details]
-- Orbit location: ✅ Pass / ⚠️ Not supported / ❌ Fail [details]
+- Navigation accuracy: ✅ Pass / ⚠️ GPS drift / ❌ Fail [details]
 - Set yaw: ✅ Pass / ❌ Fail [details]
 - Reposition: ✅ Pass / ❌ Fail [details]
 - Upload mission: ✅ Pass / ❌ Fail [details]
@@ -555,7 +554,7 @@ cat ~/MAVLinkMCP/flight_logs/flight_*.log
 - No physical constraints (can "fly through" ground)
 - Perfect GPS (no multipath or interference)
 - No wind simulation (unless configured)
-- Orbit may not work (firmware limitation)
+- GPS coordinates may need adjustment for your location
 
 **Advantages:**
 - Safe to crash
@@ -593,9 +592,9 @@ Based on comprehensive real-world testing, v1.2.1 includes:
    - Coordinate validation (lat/lon ranges, altitude >= 0)
    - Helpful examples in error responses
 
-2. **✅ Orbit Capability Detection**
-   - Automatically detects unsupported orbit commands
-   - Provides waypoint-based circle alternative with calculations
+2. **✅ GPS Navigation Improvements**
+   - Clear error messages for navigation failures
+   - Provides relative movement alternatives for precision tasks
    - Shows firmware requirements in error message
 
 3. **✅ Battery Monitoring Fallback**

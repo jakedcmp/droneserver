@@ -98,7 +98,6 @@ This shows that the `takeoff` tool sends two commands to the drone:
 
 ### Navigation
 - `drone.action.goto_location(lat, lon, alt, yaw)` - Fly to GPS coordinates
-- `drone.action.do_orbit(radius, velocity, yaw_behavior, lat, lon, alt)` - Orbit a point
 
 ### Missions
 - `drone.mission.upload_mission(waypoint_count)` - Upload waypoints to drone
@@ -168,7 +167,7 @@ Keep flight logs for compliance, safety audits, or insurance purposes.
 ### 4. Learning MAVLink
 See how high-level MCP tools translate to low-level MAVLink commands:
 ```bash
-grep -A1 "MCP_TOOL: orbit_location" flight_logs/flight_*.log
+grep -A1 "MCP_TOOL: set_yaw" flight_logs/flight_*.log
 ```
 
 ### 5. Performance Analysis
@@ -214,7 +213,7 @@ grep "set_parameter" flight_logs/flight_$(date +%Y%m%d)*.log
 grep "upload_mission" flight_logs/flight_$(date +%Y%m%d)*.log | wc -l
 
 # Count navigation commands
-grep -E "goto_location|do_orbit|set_yaw" flight_logs/flight_*.log | wc -l
+grep -E "goto_location|set_yaw|reposition" flight_logs/flight_*.log | wc -l
 ```
 
 ## Troubleshooting
