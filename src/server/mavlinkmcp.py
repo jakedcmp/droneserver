@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from mcp.server.fastmcp import Context, FastMCP
 from typing import Tuple
 from mavsdk import System
-from mavsdk.mission import MissionItem, MissionPlan
+from mavsdk.mission_raw import MissionItem
 import asyncio
 import os
 import logging
@@ -635,9 +635,9 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     
     drone = connector.drone
 
-    # Validate and construct mission items
+    # Validate and construct mission items using mission_raw (ArduPilot-compatible)
     mission_items = []
-    for point in mission_points:
+    for i, point in enumerate(mission_points):
         try:
             # Validate latitude and longitude ranges
             if not (-90 <= point["latitude_deg"] <= 90):
@@ -645,34 +645,32 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
             if not (-180 <= point["longitude_deg"] <= 180):
                 return {"status": "failed", "error": f"Invalid longitude_deg: {point['longitude_deg']}. Must be between -180 and 180."}
 
+            # Use mission_raw format (raw MAVLink protocol)
             mission_items.append(MissionItem(
-                latitude_deg=point["latitude_deg"],
-                longitude_deg=point["longitude_deg"],
-                relative_altitude_m=point["relative_altitude_m"],
-                speed_m_s=point["speed_m_s"],
-                is_fly_through=point["is_fly_through"],
-                gimbal_pitch_deg=point.get("gimbal_pitch_deg", float('nan')),
-                gimbal_yaw_deg=point.get("gimbal_yaw_deg", float('nan')),
-                camera_action=point.get("camera_action", MissionItem.CameraAction.NONE),
-                loiter_time_s=point.get("loiter_time_s", float('nan')),
-                camera_photo_interval_s=point.get("camera_photo_interval_s", float('nan')),
-                acceptance_radius_m=point.get("acceptance_radius_m", float('nan')),
-                yaw_deg=point.get("yaw_deg", float('nan')),
-                camera_photo_distance_m=point.get("camera_photo_distance_m", float('nan')),
-                vehicle_action=point.get("vehicle_action", MissionItem.VehicleAction.NONE)
+                seq=i,
+                frame=3,  # MAV_FRAME_GLOBAL_RELATIVE_ALT
+                command=16,  # MAV_CMD_NAV_WAYPOINT
+                current=1 if i == 0 else 0,
+                autocontinue=1,
+                param1=point.get("loiter_time_s", 0),  # Hold time
+                param2=point.get("acceptance_radius_m", 2.0),  # Acceptance radius
+                param3=0,  # Pass radius
+                param4=point.get("yaw_deg", float('nan')),  # Yaw angle
+                x=int(point["latitude_deg"] * 1e7),  # Latitude * 1e7
+                y=int(point["longitude_deg"] * 1e7),  # Longitude * 1e7
+                z=float(point["relative_altitude_m"]),  # Altitude
+                mission_type=0  # MAV_MISSION_TYPE_MISSION
             ))
         except KeyError as e:
             return {"status": "failed", "error": f"Missing required field in mission point: {e}"}
-
-    mission_plan = MissionPlan(mission_items)
 
     # Set return-to-launch behavior
     log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=return_to_launch)
     await drone.mission.set_return_to_launch_after_mission(return_to_launch)
 
-    log_mavlink_cmd("drone.mission.upload_mission", waypoint_count=len(mission_items))
-    logger.info("Uploading mission")
-    await drone.mission.upload_mission(mission_plan)
+    log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+    logger.info("Uploading mission using mission_raw (ArduPilot-compatible)")
+    await drone.mission_raw.upload_mission(mission_items)
 
     log_mavlink_cmd("drone.mission.start_mission")
     logger.info("⚠️  Mission starting - drone will switch to AUTO flight mode")
@@ -2046,31 +2044,28 @@ async def upload_mission(ctx: Context, waypoints: list) -> dict:
             if wp["relative_altitude_m"] < 0:
                 return {"status": "failed", "error": f"Waypoint {i}: altitude cannot be negative"}
             
-            # Use named parameters to match initiate_mission implementation
+            # Use mission_raw format (ArduPilot-compatible)
+            # MAVLink uses lat/lon * 1e7 as integers
             mission_item = MissionItem(
-                latitude_deg=float(wp["latitude_deg"]),
-                longitude_deg=float(wp["longitude_deg"]),
-                relative_altitude_m=float(wp["relative_altitude_m"]),
-                speed_m_s=float(wp.get("speed_m_s", float('nan'))),
-                is_fly_through=True,
-                gimbal_pitch_deg=float('nan'),
-                gimbal_yaw_deg=float('nan'),
-                camera_action=MissionItem.CameraAction.NONE,
-                loiter_time_s=float('nan'),
-                camera_photo_interval_s=float('nan'),
-                acceptance_radius_m=float('nan'),
-                yaw_deg=float('nan'),
-                camera_photo_distance_m=float('nan'),
-                vehicle_action=MissionItem.VehicleAction.NONE  # ← FIXED: Added missing parameter
+                seq=i,  # Sequence number
+                frame=3,  # MAV_FRAME_GLOBAL_RELATIVE_ALT
+                command=16,  # MAV_CMD_NAV_WAYPOINT
+                current=1 if i == 0 else 0,  # First waypoint is current
+                autocontinue=1,  # Auto-continue to next waypoint
+                param1=0,  # Hold time (seconds)
+                param2=2.0,  # Acceptance radius (meters)
+                param3=0,  # Pass radius (meters)
+                param4=float('nan'),  # Yaw angle (NaN = don't change)
+                x=int(wp["latitude_deg"] * 1e7),  # Latitude * 1e7
+                y=int(wp["longitude_deg"] * 1e7),  # Longitude * 1e7
+                z=float(wp["relative_altitude_m"]),  # Altitude (meters)
+                mission_type=0  # MAV_MISSION_TYPE_MISSION
             )
             mission_items.append(mission_item)
         
-        # Create mission plan
-        mission_plan = MissionPlan(mission_items)
-        
-        # Upload mission (does not start it)
-        log_mavlink_cmd("drone.mission.upload_mission", waypoint_count=len(waypoints))
-        await drone.mission.upload_mission(mission_plan)
+        # Upload mission using mission_raw (ArduPilot-compatible)
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(waypoints))
+        await drone.mission_raw.upload_mission(mission_items)
         
         logger.info(f"{LogColors.SUCCESS}✓ Mission uploaded successfully: {len(waypoints)} waypoints{LogColors.RESET}")
         
@@ -2150,20 +2145,24 @@ async def download_mission(ctx: Context) -> dict:
                 logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {retry_delay}s delay...")
                 await asyncio.sleep(retry_delay)
             
-            log_mavlink_cmd("drone.mission.download_mission")
-            mission_plan = await drone.mission.download_mission()
+            log_mavlink_cmd("drone.mission_raw.download_mission")
+            mission_items = await drone.mission_raw.download_mission()
             
-            # Convert mission items to dict format
+            # Convert raw mission items to dict format
+            # Filter for waypoint commands only (command 16 = MAV_CMD_NAV_WAYPOINT)
             waypoints = []
-            for item in mission_plan.mission_items:
-                waypoints.append({
-                    "latitude_deg": item.latitude_deg,
-                    "longitude_deg": item.longitude_deg,
-                    "relative_altitude_m": item.relative_altitude_m,
-                    "speed_m_s": item.speed_m_s if not math.isnan(item.speed_m_s) else None
-                })
+            for item in mission_items:
+                if item.command == 16:  # MAV_CMD_NAV_WAYPOINT
+                    waypoints.append({
+                        "seq": item.seq,
+                        "latitude_deg": item.x / 1e7,  # Convert from int * 1e7 to float
+                        "longitude_deg": item.y / 1e7,  # Convert from int * 1e7 to float
+                        "relative_altitude_m": item.z,
+                        "frame": item.frame,
+                        "command": item.command
+                    })
             
-            logger.info(f"{LogColors.SUCCESS}✓ Downloaded mission with {len(waypoints)} waypoints{LogColors.RESET}")
+            logger.info(f"{LogColors.SUCCESS}✓ Downloaded mission with {len(waypoints)} waypoints (from {len(mission_items)} total items){LogColors.RESET}")
             
             return {
                 "status": "success",
