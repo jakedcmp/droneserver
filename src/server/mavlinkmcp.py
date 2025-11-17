@@ -1799,6 +1799,8 @@ async def set_yaw(ctx: Context, yaw_deg: float, yaw_rate_deg_s: float = 30.0) ->
     Note:
         - 0° = North, 90° = East, 180° = South, 270° = West
         - Drone will rotate in place to face the specified direction
+        - Implementation: Uses goto_location with current position + new yaw
+          (MAVSDK doesn't have a dedicated "yaw only" command)
     """
     log_tool_call("set_yaw", yaw_deg=yaw_deg, yaw_rate_deg_s=yaw_rate_deg_s)
     connector = ctx.request_context.lifespan_context
@@ -1818,13 +1820,20 @@ async def set_yaw(ctx: Context, yaw_deg: float, yaw_rate_deg_s: float = 30.0) ->
     logger.info(f"Setting yaw to {yaw_normalized}° at {yaw_rate_deg_s}°/s")
     
     try:
-        # Get current position to use goto_location with new yaw
+        # WORKAROUND: MAVSDK doesn't have a "set yaw only" command
+        # We use goto_location with current position + new yaw
+        # This tells the drone to "fly to where you already are, but face this direction"
         async for position in drone.telemetry.position():
             current_lat = position.latitude_deg
             current_lon = position.longitude_deg
             current_alt = position.absolute_altitude_m
+            current_rel_alt = position.relative_altitude_m
+            
+            logger.info(f"Reading current position: ({current_lat:.6f}, {current_lon:.6f}) @ {current_rel_alt:.1f}m AGL")
+            logger.info(f"Commanding: same position, new yaw = {yaw_normalized}°")
             
             # Use goto_location with current position but new yaw
+            # This is the standard MAVSDK workaround for yaw-only control
             log_mavlink_cmd("drone.action.goto_location", lat=f"{current_lat:.6f}", 
                            lon=f"{current_lon:.6f}", alt=f"{current_alt:.1f}", 
                            yaw=f"{yaw_normalized:.1f}")
