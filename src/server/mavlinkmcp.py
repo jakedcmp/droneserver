@@ -260,19 +260,19 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[MAVLinkConnector]:
     
     # Only log on first initialization to avoid spam
     if not _lifespan_initialized:
-        logger.info("=" * 60)
-        logger.info("🚀 LIFESPAN: Starting application lifespan...")
-        logger.info("=" * 60)
+    logger.info("=" * 60)
+    logger.info("🚀 LIFESPAN: Starting application lifespan...")
+    logger.info("=" * 60)
     
     try:
         # Get or create the global connector (only happens once)
         if not _lifespan_initialized:
-            logger.info("LIFESPAN: Calling get_or_create_global_connector()...")
+        logger.info("LIFESPAN: Calling get_or_create_global_connector()...")
         
         connector = await get_or_create_global_connector()
         
         if not _lifespan_initialized:
-            logger.info("LIFESPAN: Connector created successfully!")
+        logger.info("LIFESPAN: Connector created successfully!")
             _lifespan_initialized = True
         
         # Just yield the global connector - no teardown per request!
@@ -418,9 +418,10 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         
         logger.info(f"Moving in GUIDED mode:")
         logger.info(f"  Current: {current_lat:.6f}°, {current_lon:.6f}°")
-        logger.info(f"  Altitude: {current_alt:.1f}m MSL (absolute) | {position.relative_altitude_m:.1f}m AGL (relative)")
+        logger.info(f"  Altitude: {position.relative_altitude_m:.1f}m (relative)")
         logger.info(f"  Offset: north={north_m:.1f}m, east={east_m:.1f}m, down={down_m:.1f}m")
-        logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_alt:.1f}m MSL")
+        target_rel_alt = position.relative_altitude_m - down_m
+        logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_rel_alt:.1f}m (relative)")
         
         # Use goto_location with calculated target coordinates
         log_mavlink_cmd("drone.action.goto_location", lat=f"{target_lat:.6f}", lon=f"{target_lon:.6f}", alt=f"{target_alt:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
@@ -843,7 +844,7 @@ async def hold_position(ctx: Context) -> dict:
             float('nan')  # Maintain current heading
         )
         
-        logger.info(f"✓ Holding position at ({current_lat:.6f}, {current_lon:.6f}) @ {current_alt:.1f}m MSL")
+        logger.info(f"{LogColors.SUCCESS}✓ Holding position at ({current_lat:.6f}, {current_lon:.6f}) @ {position.relative_altitude_m:.1f}m (relative){LogColors.RESET}")
         
         return {
             "status": "success",
@@ -851,7 +852,7 @@ async def hold_position(ctx: Context) -> dict:
             "position": {
                 "latitude_deg": current_lat,
                 "longitude_deg": current_lon,
-                "altitude_msl": current_alt,
+                "altitude_m": position.relative_altitude_m,
                 "altitude_rel": position.relative_altitude_m
             },
             "note": "Using GUIDED mode instead of LOITER to prevent altitude drift"
@@ -922,8 +923,8 @@ async def get_battery(ctx: Context) -> dict:
             elif effective_percent < 0.30:
                 battery_data["warning"] = "Battery getting low - consider landing"
             
-            logger.info(f"Battery: {battery_data['voltage_v']}V, {battery_data['remaining_percent']}% "
-                       f"{'(estimated: ' + str(battery_data.get('estimated_percent', '')) + '%)' if 'estimated_percent' in battery_data else ''}")
+            logger.info(f"{LogColors.STATUS}Battery: {battery_data['voltage_v']}V, {battery_data['remaining_percent']}% "
+                       f"{'(estimated: ' + str(battery_data.get('estimated_percent', '')) + '%)' if 'estimated_percent' in battery_data else ''}{LogColors.RESET}")
             return {"status": "success", "battery": battery_data}
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get battery status: {e}{LogColors.RESET}")
@@ -988,7 +989,7 @@ async def get_health(ctx: Context) -> dict:
             if warnings:
                 health_data["warnings"] = warnings
             
-            logger.info(f"System health: {health_data['overall_status']}")
+            logger.info(f"{LogColors.STATUS}System health: {health_data['overall_status']}{LogColors.RESET}")
             return {"status": "success", "health": health_data}
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get health status: {e}{LogColors.RESET}")
@@ -1234,9 +1235,15 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
         return {"status": "failed", "error": f"Invalid longitude: {longitude_deg}. Must be between -180 and 180."}
     
     drone = connector.drone
-    logger.info(f"Flying to GPS location: {latitude_deg}, {longitude_deg} at {absolute_altitude_m}m MSL")
     
     try:
+        # Get current position to calculate relative altitude for display
+        position = await drone.telemetry.position().__anext__()
+        home_alt = position.absolute_altitude_m - position.relative_altitude_m
+        relative_alt = absolute_altitude_m - home_alt
+        
+        logger.info(f"Flying to GPS location: {latitude_deg}, {longitude_deg} at {relative_alt:.1f}m (relative)")
+        
         log_mavlink_cmd("drone.action.goto_location", lat=f"{latitude_deg:.6f}", lon=f"{longitude_deg:.6f}", alt=f"{absolute_altitude_m:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
         await drone.action.goto_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg)
         return {
@@ -1480,7 +1487,7 @@ async def get_in_air(ctx: Context) -> dict:
     try:
         async for in_air in drone.telemetry.in_air():
             status_text = "IN AIR (flying)" if in_air else "ON GROUND"
-            logger.info(f"Drone status: {status_text}")
+            logger.info(f"{LogColors.STATUS}Drone status: {status_text}{LogColors.RESET}")
             return {
                 "status": "success", 
                 "in_air": in_air,
@@ -1514,7 +1521,7 @@ async def get_armed(ctx: Context) -> dict:
     try:
         async for armed in drone.telemetry.armed():
             status_text = "ARMED (motors ready)" if armed else "DISARMED (motors off)"
-            logger.info(f"Drone status: {status_text}")
+            logger.info(f"{LogColors.STATUS}Drone status: {status_text}{LogColors.RESET}")
             return {
                 "status": "success", 
                 "armed": armed,
@@ -1660,7 +1667,7 @@ async def set_parameter(ctx: Context, name: str, value: float, param_type: str =
             log_mavlink_cmd("drone.param.set_param_float", name=name, value=float(value))
             await drone.param.set_param_float(name, float(value))
         
-        logger.info(f"✓ Parameter {name} changed from {old_value} to {value}")
+        logger.info(f"{LogColors.SUCCESS}✓ Parameter {name} changed from {old_value} to {value}{LogColors.RESET}")
         
         return {
             "status": "success",
@@ -1832,7 +1839,7 @@ async def set_yaw(ctx: Context, yaw_deg: float, yaw_rate_deg_s: float = 30.0) ->
             direction_index = int((yaw_normalized + 22.5) / 45) % 8
             cardinal = directions[direction_index]
             
-            logger.info(f"✓ Yaw set to {yaw_normalized}° ({cardinal})")
+            logger.info(f"{LogColors.SUCCESS}✓ Yaw set to {yaw_normalized}° ({cardinal}){LogColors.RESET}")
             
             return {
                 "status": "success",
@@ -2038,7 +2045,7 @@ async def upload_mission(ctx: Context, waypoints: list) -> dict:
         log_mavlink_cmd("drone.mission.upload_mission", waypoint_count=len(waypoints))
         await drone.mission.upload_mission(mission_plan)
         
-        logger.info(f"✓ Mission uploaded successfully: {len(waypoints)} waypoints")
+        logger.info(f"{LogColors.SUCCESS}✓ Mission uploaded successfully: {len(waypoints)} waypoints{LogColors.RESET}")
         
         return {
             "status": "success",
@@ -2109,7 +2116,7 @@ async def download_mission(ctx: Context) -> dict:
                     "speed_m_s": item.speed_m_s if not math.isnan(item.speed_m_s) else None
                 })
             
-            logger.info(f"✓ Downloaded mission with {len(waypoints)} waypoints")
+            logger.info(f"{LogColors.SUCCESS}✓ Downloaded mission with {len(waypoints)} waypoints{LogColors.RESET}")
             
             return {
                 "status": "success",
@@ -2187,7 +2194,7 @@ async def set_current_waypoint(ctx: Context, waypoint_index: int) -> dict:
         log_mavlink_cmd("drone.mission.set_current_mission_item", waypoint_index=waypoint_index)
         await drone.mission.set_current_mission_item(waypoint_index)
         
-        logger.info(f"✓ Current waypoint set to index {waypoint_index}")
+        logger.info(f"{LogColors.SUCCESS}✓ Current waypoint set to index {waypoint_index}{LogColors.RESET}")
         
         return {
             "status": "success",
