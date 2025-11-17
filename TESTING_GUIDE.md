@@ -71,6 +71,59 @@ PHASE 7 - POST-FLIGHT:
 30. Show me all parameters that changed during the flight (compare with initial values)
 
 Please execute this entire inspection mission step by step, confirming each action before moving to the next. Warn me immediately if any step fails or if battery gets critically low.
+
+═══════════════════════════════════════════════════════════
+FINAL COMPREHENSIVE REPORT
+═══════════════════════════════════════════════════════════
+
+After completing all phases, please create a detailed report with:
+
+**1. Mission Summary:**
+   - Total phases completed: X/7
+   - Total operations performed: X/30
+   - Flight time: X minutes
+   - Battery consumed: X%
+   - Final location: [coordinates]
+
+**2. Phase-by-Phase Results:**
+   - Phase 1 (Pre-flight): ✅/❌ - [brief summary]
+   - Phase 2 (Mission Prep): ✅/❌ - [brief summary]
+   - Phase 3 (Flight Ops): ✅/❌ - [brief summary]
+   - Phase 4 (Inspection): ✅/❌ - [brief summary]
+   - Phase 5 (Mission Exec): ✅/❌ - [brief summary]
+   - Phase 6 (Return): ✅/❌ - [brief summary]
+   - Phase 7 (Post-flight): ✅/❌ - [brief summary]
+
+**3. Tools Used:**
+   - List all MCP tools called during the mission
+   - Note which tools worked perfectly vs had issues
+
+**4. Issues Encountered:**
+   - List any errors, warnings, or unexpected behavior
+   - For each issue: what happened, what was expected, impact
+
+**5. New Features Performance (v1.2.0):**
+   - Parameter management: ✅/❌ [notes]
+   - Advanced navigation (orbit, yaw, reposition): ✅/❌ [notes]
+   - Mission enhancements: ✅/❌ [notes]
+
+**6. Safety & Monitoring:**
+   - Battery warnings: [any triggered?]
+   - Pre-disarm safety checks: [passed?]
+   - Flight mode changes: [list when modes changed]
+
+**7. Overall Assessment:**
+   - Mission success: YES/NO
+   - System stability: Excellent/Good/Fair/Poor
+   - Production ready: YES/NO
+   - Key observations: [your analysis]
+
+**8. Recommendations:**
+   - What worked well
+   - What needs improvement
+   - Suggested next tests
+
+Format this report clearly with sections and bullet points for easy reading.
 ```
 
 ### What This Tests
@@ -727,6 +780,15 @@ Quick inspection test:
 13. Disarm
 
 Execute this step by step and report status after each action.
+
+After completing all steps, create a summary report:
+- Total steps completed: X/13
+- Steps that succeeded: [list]
+- Steps that failed: [list with reasons]
+- Battery used: X%
+- New features tested: [list which v1.2.0 features were used]
+- Overall success: YES/NO
+- Key observations: [brief notes]
 ```
 
 ---
