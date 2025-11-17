@@ -10,6 +10,7 @@ Your MAVLink MCP server logs now use ANSI color codes to make different log type
 |----------|-------|-------|---------|
 | **MCP Tool Calls** | 🟢 GREEN | 🔧 | `🔧 MCP TOOL: arm_drone()` |
 | **MAVLink Commands** | 🔵 CYAN | 📡 | `📡 MAVLink → drone.action.arm()` |
+| **HTTP Requests** | 🟣 MAGENTA | 🌐 | `🌐 HTTP → POST /messages/` |
 | **Tool Errors** | 🔴 RED | ❌ | `❌ TOOL ERROR - Failed to arm: ...` |
 | **Warnings** | 🟡 YELLOW | ⚠️ | `⚠️ EMERGENCY MOTOR KILL ACTIVATED` |
 | **Standard Info** | ⚪ WHITE | ℹ️ | `✓ Drone armed successfully` |
@@ -21,23 +22,28 @@ Your MAVLink MCP server logs now use ANSI color codes to make different log type
 Here's what a typical flight sequence looks like with color coding:
 
 ```
+02:30:08 | INFO    | 🌐 HTTP → POST /messages/?session_id=abc123                 [MAGENTA]
+02:30:09 | INFO    | 🌐 HTTP → 202 Accepted                                       [MAGENTA]
+
 02:30:10 | INFO    | 🔧 MCP TOOL: get_health()                                    [GREEN]
 02:30:10 | INFO    | Health check complete - all systems nominal
+02:30:10 | INFO    | 🌐 HTTP → POST /messages/?session_id=abc123                 [MAGENTA]
 
 02:30:12 | INFO    | 🔧 MCP TOOL: arm_drone()                                     [GREEN]
 02:30:12 | INFO    | Arming drone...
 02:30:12 | INFO    | 📡 MAVLink → drone.action.arm()                              [CYAN]
 02:30:13 | INFO    | ✓ Drone armed successfully
+02:30:13 | INFO    | 🌐 HTTP → POST /messages/?session_id=abc123                 [MAGENTA]
 
 02:30:15 | INFO    | 🔧 MCP TOOL: takeoff(takeoff_altitude=10.0)                 [GREEN]
 02:30:15 | INFO    | 📡 MAVLink → drone.action.set_takeoff_altitude(altitude=10.0) [CYAN]
 02:30:15 | INFO    | 📡 MAVLink → drone.action.takeoff()                         [CYAN]
 02:30:15 | INFO    | ✓ Takeoff initiated to 10.0m
 
-02:30:20 | INFO    | 🔧 MCP TOOL: go_to_location(...)                            [GREEN]
+02:30:20 | INFO    | 🔧 MCP TOOL: go_to_location(latitude_deg=33.646, longitude_deg=-117.843, ...) [GREEN]
 02:30:20 | INFO    | 📡 MAVLink → drone.action.goto_location(lat=33.646, lon=-117.843, ...) [CYAN]
 
-02:30:25 | INFO    | 🔧 MCP TOOL: set_yaw(yaw_deg=90.0)                          [GREEN]
+02:30:25 | INFO    | 🔧 MCP TOOL: set_yaw(yaw_deg=90.0, yaw_rate_deg_s=30.0)    [GREEN]
 02:30:25 | INFO    | 📡 MAVLink → drone.action.goto_location(...)                [CYAN]
 02:30:25 | INFO    | ✓ Yaw set to 90.0° (E)
 
@@ -87,6 +93,11 @@ sudo journalctl -u mavlinkmcp -f --output=cat | grep "📡 MAVLink"
 sudo journalctl -u mavlinkmcp -f --output=cat | grep "🔧 MCP TOOL"
 ```
 
+**Only HTTP requests (magenta):**
+```bash
+sudo journalctl -u mavlinkmcp -f --output=cat | grep "🌐 HTTP"
+```
+
 **Only errors (red):**
 ```bash
 sudo journalctl -u mavlinkmcp -f --output=cat | grep "❌ TOOL ERROR"
@@ -97,7 +108,12 @@ sudo journalctl -u mavlinkmcp -f --output=cat | grep "❌ TOOL ERROR"
 sudo journalctl -u mavlinkmcp -f --output=cat | grep "⚠️"
 ```
 
-**Complete flight sequence (tools + MAVLink, with colors):**
+**Complete flight sequence (HTTP → Tool → MAVLink, with colors):**
+```bash
+sudo journalctl -u mavlinkmcp -f --output=cat | grep -E "HTTP|MCP TOOL|MAVLink"
+```
+
+**Only tool calls and MAVLink commands (no HTTP noise):**
 ```bash
 sudo journalctl -u mavlinkmcp -f --output=cat | grep -E "MCP TOOL|MAVLink"
 ```
