@@ -61,12 +61,16 @@ class LogColors:
     MAGENTA = '\033[35m'  # Dark magenta
     CYAN = '\033[36m'     # Dark cyan
     WHITE = '\033[37m'    # Light gray
+    GRAY = '\033[90m'     # Dark gray for separators
     
     # Combined styles for specific log types
     MAVLINK = '\033[36m'  # Dark cyan for MAVLink commands
     TOOL = '\033[32m'     # Dark green for MCP tool calls
     ERROR = '\033[31m'    # Dark red for errors
     HTTP = '\033[35m'     # Dark magenta for HTTP requests (GET/POST)
+    STATUS = '\033[94m'   # Bright blue for drone status/responses
+    SUCCESS = '\033[92m'  # Bright green for success messages (✓)
+    SEPARATOR = '\033[90m'  # Dark gray for visual separators
 
 class FlightLogger:
     """Logs flight operations to a timestamped file"""
@@ -107,7 +111,10 @@ def get_flight_logger() -> FlightLogger:
     return _flight_logger
 
 def log_tool_call(tool_name: str, **kwargs):
-    """Log MCP tool call with parameters (GREEN)"""
+    """Log MCP tool call with parameters (GREEN) with visual separator"""
+    # Add visual separator before each tool call
+    logger.info(f"{LogColors.SEPARATOR}{'─' * 60}{LogColors.RESET}")
+    
     if kwargs:
         params_str = ", ".join([f"{k}={v}" for k, v in kwargs.items() if v is not None])
         msg = f"{tool_name}({params_str})"
@@ -2079,45 +2086,65 @@ async def download_mission(ctx: Context) -> dict:
     drone = connector.drone
     logger.info("Downloading mission from drone")
     
-    try:
-        log_mavlink_cmd("drone.mission.download_mission")
-        mission_plan = await drone.mission.download_mission()
-        
-        # Convert mission items to dict format
-        waypoints = []
-        for item in mission_plan.mission_items:
-            waypoints.append({
-                "latitude_deg": item.latitude_deg,
-                "longitude_deg": item.longitude_deg,
-                "relative_altitude_m": item.relative_altitude_m,
-                "speed_m_s": item.speed_m_s if not math.isnan(item.speed_m_s) else None
-            })
-        
-        logger.info(f"✓ Downloaded mission with {len(waypoints)} waypoints")
-        
-        return {
-            "status": "success",
-            "waypoint_count": len(waypoints),
-            "waypoints": waypoints
-        }
-    except Exception as e:
-        error_str = str(e)
-        logger.error(f"Mission download failed: {e}{LogColors.RESET}")
-        
-        # Provide helpful error message
-        if "UNSUPPORTED" in error_str.upper():
+    # Try to download mission with retry logic (ArduPilot needs time to process uploads)
+    max_retries = 3
+    retry_delay = 0.5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {retry_delay}s delay...")
+                await asyncio.sleep(retry_delay)
+            
+            log_mavlink_cmd("drone.mission.download_mission")
+            mission_plan = await drone.mission.download_mission()
+            
+            # Convert mission items to dict format
+            waypoints = []
+            for item in mission_plan.mission_items:
+                waypoints.append({
+                    "latitude_deg": item.latitude_deg,
+                    "longitude_deg": item.longitude_deg,
+                    "relative_altitude_m": item.relative_altitude_m,
+                    "speed_m_s": item.speed_m_s if not math.isnan(item.speed_m_s) else None
+                })
+            
+            logger.info(f"✓ Downloaded mission with {len(waypoints)} waypoints")
+            
             return {
-                "status": "failed", 
-                "error": "Mission download failed - no mission available or mission was cleared",
-                "hint": "Upload a mission first using upload_mission or initiate_mission before downloading",
-                "technical_error": error_str
+                "status": "success",
+                "waypoint_count": len(waypoints),
+                "waypoints": waypoints,
+                "note": f"Downloaded on attempt {attempt + 1}" if attempt > 0 else None
             }
-        else:
-            return {
-                "status": "failed", 
-                "error": f"Mission download failed: {error_str}",
-                "hint": "Ensure a mission has been uploaded to the drone"
-            }
+            
+        except Exception as e:
+            error_str = str(e)
+            
+            # If UNSUPPORTED and not last attempt, retry
+            if "UNSUPPORTED" in error_str.upper() and attempt < max_retries - 1:
+                logger.warning(f"Mission download attempt {attempt + 1} failed (UNSUPPORTED), retrying...")
+                continue
+            
+            # Last attempt or different error - report it
+            logger.error(f"Mission download failed after {attempt + 1} attempts: {e}{LogColors.RESET}")
+            
+            # Provide helpful error message
+            if "UNSUPPORTED" in error_str.upper():
+                return {
+                    "status": "failed", 
+                    "error": "Mission download not supported by autopilot in current state",
+                    "hint": "This can happen if: (1) No mission uploaded yet, (2) Mission was cleared, (3) Autopilot doesn't support download in current flight mode, (4) Need to wait longer after upload",
+                    "attempts": attempt + 1,
+                    "technical_error": error_str
+                }
+            else:
+                return {
+                    "status": "failed", 
+                    "error": f"Mission download failed: {error_str}",
+                    "hint": "Ensure a mission has been uploaded to the drone",
+                    "attempts": attempt + 1
+                }
 
 @mcp.tool()
 async def set_current_waypoint(ctx: Context, waypoint_index: int) -> dict:
