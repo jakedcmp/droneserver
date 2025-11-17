@@ -119,11 +119,20 @@ def log_tool_call(tool_name: str, **kwargs):
         params_str = ", ".join([f"{k}={v}" for k, v in kwargs.items() if v is not None])
         msg = f"{tool_name}({params_str})"
         logger.info(f"{LogColors.TOOL}🔧 MCP TOOL: {msg}{LogColors.RESET}")
+        # Log input JSON
+        import json
+        logger.info(f"{LogColors.TOOL}📥 INPUT: {json.dumps(kwargs, default=str)}{LogColors.RESET}")
         get_flight_logger().log_entry("MCP_TOOL", msg)
     else:
         msg = f"{tool_name}()"
         logger.info(f"{LogColors.TOOL}🔧 MCP TOOL: {msg}{LogColors.RESET}")
+        logger.info(f"{LogColors.TOOL}📥 INPUT: {{}}{LogColors.RESET}")
         get_flight_logger().log_entry("MCP_TOOL", msg)
+
+def log_tool_output(output: dict):
+    """Log MCP tool output as JSON (GREEN)"""
+    import json
+    logger.info(f"{LogColors.TOOL}📤 OUTPUT: {json.dumps(output, default=str, indent=2)}{LogColors.RESET}")
 
 def log_mavlink_cmd(command: str, **kwargs):
     """Log MAVLink command being sent to drone (CYAN)"""
@@ -350,12 +359,14 @@ async def get_position(ctx: Context) -> dict:
 
     try:
         async for position in drone.telemetry.position():
-            return {"status": "success", "position": {
+            result = {"status": "success", "position": {
                 "latitude_deg": position.latitude_deg,
                 "longitude_deg": position.longitude_deg,
                 "absolute_altitude_m": position.absolute_altitude_m,
                 "relative_altitude_m": position.relative_altitude_m
             }}
+            log_tool_output(result)
+            return result
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to retrieve position: {e}{LogColors.RESET}")
         return {"status": "failed", "error": str(e)}
