@@ -44,6 +44,26 @@ sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure'
 # ============================================================
 from datetime import datetime
 
+# ANSI color codes for terminal output
+class LogColors:
+    """ANSI color codes for colored terminal output"""
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    
+    # Colors
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    
+    # Combined styles
+    MAVLINK = '\033[96m'  # Cyan for MAVLink commands
+    TOOL = '\033[92m'     # Green for MCP tool calls
+    ERROR = '\033[91m'    # Red for errors
+
 class FlightLogger:
     """Logs flight operations to a timestamped file"""
     def __init__(self):
@@ -70,7 +90,7 @@ class FlightLogger:
             with open(self.log_file, 'a') as f:
                 f.write(f"[{timestamp}] {entry_type}: {message}\n")
         except Exception as e:
-            logger.error(f"Failed to write to flight log: {e}")
+            logger.error(f"{LogColors.ERROR}Failed to write to flight log: {e}{LogColors.RESET}")
 
 # Global flight logger instance
 _flight_logger: FlightLogger | None = None
@@ -83,27 +103,27 @@ def get_flight_logger() -> FlightLogger:
     return _flight_logger
 
 def log_tool_call(tool_name: str, **kwargs):
-    """Log MCP tool call with parameters"""
+    """Log MCP tool call with parameters (GREEN)"""
     if kwargs:
         params_str = ", ".join([f"{k}={v}" for k, v in kwargs.items() if v is not None])
         msg = f"{tool_name}({params_str})"
-        logger.info(f"🔧 MCP TOOL: {msg}")
+        logger.info(f"{LogColors.TOOL}🔧 MCP TOOL: {msg}{LogColors.RESET}")
         get_flight_logger().log_entry("MCP_TOOL", msg)
     else:
         msg = f"{tool_name}()"
-        logger.info(f"🔧 MCP TOOL: {msg}")
+        logger.info(f"{LogColors.TOOL}🔧 MCP TOOL: {msg}{LogColors.RESET}")
         get_flight_logger().log_entry("MCP_TOOL", msg)
 
 def log_mavlink_cmd(command: str, **kwargs):
-    """Log MAVLink command being sent to drone"""
+    """Log MAVLink command being sent to drone (CYAN)"""
     if kwargs:
         params_str = ", ".join([f"{k}={v}" for k, v in kwargs.items() if v is not None])
         msg = f"{command}({params_str})"
-        logger.info(f"📡 MAVLink → {msg}")
+        logger.info(f"{LogColors.MAVLINK}📡 MAVLink → {msg}{LogColors.RESET}")
         get_flight_logger().log_entry("MAVLink_CMD", msg)
     else:
         msg = f"{command}()"
-        logger.info(f"📡 MAVLink → {msg}")
+        logger.info(f"{LogColors.MAVLINK}📡 MAVLink → {msg}{LogColors.RESET}")
         get_flight_logger().log_entry("MAVLink_CMD", msg)
 
 @dataclass
@@ -131,7 +151,7 @@ async def ensure_connection(connector: MAVLinkConnector, timeout: float = 30.0) 
         await asyncio.wait_for(connector.connection_ready.wait(), timeout=timeout)
         return True
     except asyncio.TimeoutError:
-        logger.error(f"Drone connection timeout after {timeout}s")
+        logger.error(f"{LogColors.ERROR}❌ Drone connection timeout after {timeout}s{LogColors.RESET}")
         return False
 
 async def connect_drone_background(drone: System, address: str, port: str, protocol: str, connection_ready: asyncio.Event):
@@ -311,7 +331,7 @@ async def get_position(ctx: Context) -> dict:
                 "relative_altitude_m": position.relative_altitude_m
             }}
     except Exception as e:
-        logger.error(f"Failed to retrieve position: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to retrieve position: {e}{LogColors.RESET}")
         return {"status": "failed", "error": str(e)}
 
 @mcp.tool()
@@ -396,7 +416,7 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         }
         
     except Exception as e:
-        logger.error(f"Failed to execute relative movement: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to execute relative movement: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Movement failed: {str(e)}"}
 
 @mcp.tool()
@@ -646,7 +666,7 @@ async def get_flight_mode(ctx: Context) -> dict:
         logger.info(f"FlightMode: {flight_mode}")
         return {"status": "success", "flight_mode": str(flight_mode)}
     except StopAsyncIteration:
-        logger.error("Failed to retrieve flight mode")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to retrieve flight mode{LogColors.RESET}")
         return {"status": "failed", "error": "Failed to retrieve flight mode"}
 
 # ============================================================================
@@ -680,7 +700,7 @@ async def disarm_drone(ctx: Context) -> dict:
         await drone.action.disarm()
         return {"status": "success", "message": "Drone disarmed - motors stopped"}
     except Exception as e:
-        logger.error(f"Failed to disarm: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to disarm: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Disarm failed: {str(e)}"}
 
 @mcp.tool()
@@ -711,7 +731,7 @@ async def return_to_launch(ctx: Context) -> dict:
         await drone.action.return_to_launch()
         return {"status": "success", "message": "Return to Launch initiated - drone returning home"}
     except Exception as e:
-        logger.error(f"RTL failed: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - RTL failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Return to Launch failed: {str(e)}"}
 
 @mcp.tool()
@@ -736,7 +756,7 @@ async def kill_motors(ctx: Context) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
-    logger.warning("⚠️  EMERGENCY MOTOR KILL ACTIVATED ⚠️")
+    logger.warning(f"{LogColors.YELLOW}⚠️  EMERGENCY MOTOR KILL ACTIVATED ⚠️{LogColors.RESET}")
     
     try:
         log_mavlink_cmd("drone.action.kill")
@@ -747,7 +767,7 @@ async def kill_motors(ctx: Context) -> dict:
             "warning": "This is an emergency action. Drone may be damaged."
         }
     except Exception as e:
-        logger.error(f"Motor kill failed: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Motor kill failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Motor kill failed: {str(e)}"}
 
 @mcp.tool()
@@ -807,7 +827,7 @@ async def hold_position(ctx: Context) -> dict:
             "note": "Using GUIDED mode instead of LOITER to prevent altitude drift"
         }
     except Exception as e:
-        logger.error(f"Hold position failed: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Hold position failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Hold position failed: {str(e)}"}
 
 @mcp.tool()
@@ -875,7 +895,7 @@ async def get_battery(ctx: Context) -> dict:
                        f"{'(estimated: ' + str(battery_data.get('estimated_percent', '')) + '%)' if 'estimated_percent' in battery_data else ''}")
             return {"status": "success", "battery": battery_data}
     except Exception as e:
-        logger.error(f"Failed to get battery status: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get battery status: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Battery read failed: {str(e)}"}
 
 # ============================================================================
@@ -939,7 +959,7 @@ async def get_health(ctx: Context) -> dict:
             logger.info(f"System health: {health_data['overall_status']}")
             return {"status": "success", "health": health_data}
     except Exception as e:
-        logger.error(f"Failed to get health status: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get health status: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Health check failed: {str(e)}"}
 
 @mcp.tool()
@@ -967,10 +987,10 @@ async def pause_mission(ctx: Context) -> dict:
     Returns:
         dict: Error message directing to safe alternative.
     """
-    logger.error("⛔ pause_mission() called - THIS TOOL IS DEPRECATED AND UNSAFE!")
-    logger.error("⚠️  CRITICAL: pause_mission enters LOITER mode which requires RC throttle input")
-    logger.error("⚠️  Without RC throttle at 50%, altitude is unpredictable - this has caused crashes!")
-    logger.error("⚠️  Use hold_mission_position() instead - it stays in GUIDED mode")
+    logger.error(f"{LogColors.ERROR}⛔ pause_mission() called - THIS TOOL IS DEPRECATED AND UNSAFE!{LogColors.RESET}")
+    logger.error(f"{LogColors.ERROR}⚠️  CRITICAL: pause_mission enters LOITER mode which requires RC throttle input{LogColors.RESET}")
+    logger.error(f"{LogColors.ERROR}⚠️  Without RC throttle at 50%, altitude is unpredictable - this has caused crashes!{LogColors.RESET}")
+    logger.error(f"{LogColors.ERROR}⚠️  Use hold_mission_position() instead - it stays in GUIDED mode{LogColors.RESET}")
     
     return {
         "status": "failed",
@@ -1053,7 +1073,7 @@ async def hold_mission_position(ctx: Context) -> dict:
             "note": "Mission stopped. To continue: use set_current_waypoint() then resume_mission(), or start a new mission."
         }
     except Exception as e:
-        logger.error(f"Failed to hold mission position: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to hold mission position: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Hold mission position failed: {str(e)}"}
 
 @mcp.tool()
@@ -1113,7 +1133,7 @@ async def resume_mission(ctx: Context) -> dict:
             "note": "Flight mode should have changed to AUTO/MISSION for mission execution"
         }
     except Exception as e:
-        logger.error(f"Failed to resume mission: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to resume mission: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Mission resume failed: {str(e)}"}
 
 @mcp.tool()
@@ -1143,7 +1163,7 @@ async def clear_mission(ctx: Context) -> dict:
         await drone.mission.clear_mission()
         return {"status": "success", "message": "Mission cleared - all waypoints removed"}
     except Exception as e:
-        logger.error(f"Failed to clear mission: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to clear mission: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Mission clear failed: {str(e)}"}
 
 # ============================================================================
@@ -1197,7 +1217,7 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
             }
         }
     except Exception as e:
-        logger.error(f"Go to location failed: {e}")
+        logger.error(f"Go to location failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Navigation failed: {str(e)}"}
 
 @mcp.tool()
@@ -1232,7 +1252,7 @@ async def get_home_position(ctx: Context) -> dict:
             logger.info(f"Home position: {home_data['latitude_deg']}, {home_data['longitude_deg']} at {home_data['absolute_altitude_m']}m")
             return {"status": "success", "home": home_data}
     except Exception as e:
-        logger.error(f"Failed to get home position: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get home position: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Home position read failed: {str(e)}"}
 
 @mcp.tool()
@@ -1273,7 +1293,7 @@ async def set_max_speed(ctx: Context, speed_m_s: float) -> dict:
             "speed_kmh": round(speed_m_s * 3.6, 1)  # Also provide in km/h
         }
     except Exception as e:
-        logger.error(f"Failed to set max speed: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to set max speed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Set max speed failed: {str(e)}"}
 
 # ============================================================================
@@ -1318,7 +1338,7 @@ async def get_speed(ctx: Context) -> dict:
             logger.info(f"Ground speed: {speed_data['ground_speed_m_s']} m/s ({speed_data['ground_speed_kmh']} km/h)")
             return {"status": "success", "velocity": speed_data}
     except Exception as e:
-        logger.error(f"Failed to get speed: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get speed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Speed read failed: {str(e)}"}
 
 @mcp.tool()
@@ -1354,7 +1374,7 @@ async def get_attitude(ctx: Context) -> dict:
             logger.info(f"Attitude: roll={attitude_data['roll_deg']}°, pitch={attitude_data['pitch_deg']}°, yaw={attitude_data['yaw_deg']}°")
             return {"status": "success", "attitude": attitude_data}
     except Exception as e:
-        logger.error(f"Failed to get attitude: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get attitude: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Attitude read failed: {str(e)}"}
 
 @mcp.tool()
@@ -1400,7 +1420,7 @@ async def get_gps_info(ctx: Context) -> dict:
             logger.info(f"GPS: {gps_data['num_satellites']} satellites, {gps_data['fix_type']}, {gps_data['quality']}")
             return {"status": "success", "gps": gps_data}
     except Exception as e:
-        logger.error(f"Failed to get GPS info: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get GPS info: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"GPS info read failed: {str(e)}"}
 
 @mcp.tool()
@@ -1434,7 +1454,7 @@ async def get_in_air(ctx: Context) -> dict:
                 "status_text": status_text
             }
     except Exception as e:
-        logger.error(f"Failed to check in_air status: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to check in_air status: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"In-air check failed: {str(e)}"}
 
 @mcp.tool()
@@ -1468,7 +1488,7 @@ async def get_armed(ctx: Context) -> dict:
                 "status_text": status_text
             }
     except Exception as e:
-        logger.error(f"Failed to check armed status: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to check armed status: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Armed check failed: {str(e)}"}
 
 # ============================================================================
@@ -1542,7 +1562,7 @@ async def get_parameter(ctx: Context, name: str, param_type: str = "auto") -> di
                     "type": "int"
                 }
     except Exception as e:
-        logger.error(f"Failed to get parameter {name}: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get parameter {name}: {e}{LogColors.RESET}")
         return {
             "status": "failed", 
             "error": f"Parameter '{name}' not found or inaccessible: {str(e)}",
@@ -1619,7 +1639,7 @@ async def set_parameter(ctx: Context, name: str, value: float, param_type: str =
             "warning": "Some parameters may require a reboot to take effect."
         }
     except Exception as e:
-        logger.error(f"Failed to set parameter {name}: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to set parameter {name}: {e}{LogColors.RESET}")
         return {
             "status": "failed", 
             "error": f"Failed to set parameter '{name}': {str(e)}",
@@ -1707,7 +1727,7 @@ async def list_parameters(ctx: Context, filter_prefix: str = "") -> dict:
                 "warning": f"This is a large list ({len(params_list)} parameters). Consider using filter_prefix to narrow results."
             }
     except Exception as e:
-        logger.error(f"Failed to list parameters: {e}")
+        logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to list parameters: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Failed to retrieve parameters: {str(e)}"}
 
 # ============================================================================
@@ -1808,7 +1828,7 @@ async def orbit_location(
         
         # Check if it's an unsupported command error
         if "not supported" in error_msg or "unsupported" in error_msg or "command not found" in error_msg:
-            logger.warning(f"Orbit command not supported by autopilot: {e}")
+            logger.warning(f"Orbit command not supported by autopilot: {e}{LogColors.RESET}")
             
             # Calculate waypoint circle as fallback suggestion
             num_waypoints = max(8, int(2 * math.pi * radius_m / 10))  # ~10m between points
@@ -1831,7 +1851,7 @@ async def orbit_location(
             }
         else:
             # Other error
-            logger.error(f"Orbit failed: {e}")
+            logger.error(f"Orbit failed: {e}{LogColors.RESET}")
             return {
                 "status": "failed",
                 "error": f"Orbit command failed: {str(e)}",
@@ -1913,7 +1933,7 @@ async def set_yaw(ctx: Context, yaw_deg: float, yaw_rate_deg_s: float = 30.0) ->
                 "yaw_rate_deg_s": yaw_rate_deg_s
             }
     except Exception as e:
-        logger.error(f"Set yaw failed: {e}")
+        logger.error(f"Set yaw failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Yaw control failed: {str(e)}"}
 
 @mcp.tool()
@@ -1983,7 +2003,7 @@ async def reposition(
             "note": "Drone will fly to location and loiter (hover) there"
         }
     except Exception as e:
-        logger.error(f"Reposition failed: {e}")
+        logger.error(f"Reposition failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Reposition failed: {str(e)}"}
 
 # ============================================================================
@@ -2122,7 +2142,7 @@ async def upload_mission(ctx: Context, waypoints: list) -> dict:
             "note": "Mission uploaded but NOT started. Use initiate_mission to start."
         }
     except Exception as e:
-        logger.error(f"Mission upload failed: {e}")
+        logger.error(f"Mission upload failed: {e}{LogColors.RESET}")
         return {
             "status": "failed", 
             "error": f"Mission upload failed: {str(e)}",
@@ -2180,7 +2200,7 @@ async def download_mission(ctx: Context) -> dict:
         }
     except Exception as e:
         error_str = str(e)
-        logger.error(f"Mission download failed: {e}")
+        logger.error(f"Mission download failed: {e}{LogColors.RESET}")
         
         # Provide helpful error message
         if "UNSUPPORTED" in error_str.upper():
@@ -2247,7 +2267,7 @@ async def set_current_waypoint(ctx: Context, waypoint_index: int) -> dict:
             "note": "Mission will continue from this waypoint"
         }
     except Exception as e:
-        logger.error(f"Set current waypoint failed: {e}")
+        logger.error(f"Set current waypoint failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Set waypoint failed: {str(e)}"}
 
 @mcp.tool()
@@ -2310,7 +2330,7 @@ async def is_mission_finished(ctx: Context) -> dict:
             "progress_percentage": round((current_wp / total_wp * 100) if total_wp > 0 else 0, 1)
         }
     except Exception as e:
-        logger.error(f"Check mission finished failed: {e}")
+        logger.error(f"Check mission finished failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Mission status check failed: {str(e)}"}
 
 
