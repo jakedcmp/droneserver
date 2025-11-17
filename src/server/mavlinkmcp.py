@@ -657,15 +657,18 @@ async def kill_motors(ctx: Context) -> dict:
 @mcp.tool()
 async def hold_position(ctx: Context) -> dict:
     """
-    Command the drone to hold its current position (loiter/hover mode).
+    Command the drone to hold its current position while staying in GUIDED mode.
     Useful for pausing during flight to assess situation or wait.
     Waits for connection if not ready.
+    
+    Note: This uses goto_location with current position instead of hold() to avoid
+          switching to LOITER mode which can cause unwanted altitude changes.
 
     Args:
         ctx (Context): The context of the request.
 
     Returns:
-        dict: Status message with success or error.
+        dict: Status message with success or error including current position.
     """
     connector = ctx.request_context.lifespan_context
     
@@ -674,11 +677,37 @@ async def hold_position(ctx: Context) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
-    logger.info("Commanding drone to hold position")
+    logger.info("Commanding drone to hold position (staying in GUIDED mode)")
     
     try:
-        await drone.action.hold()
-        return {"status": "success", "message": "Drone holding position (hovering/loitering)"}
+        # Get current position
+        position = await drone.telemetry.position().__anext__()
+        current_lat = position.latitude_deg
+        current_lon = position.longitude_deg
+        current_alt = position.absolute_altitude_m
+        
+        # Send goto_location with current position - keeps drone in GUIDED mode
+        # This prevents the altitude drop that occurs when switching to LOITER mode
+        await drone.action.goto_location(
+            current_lat,
+            current_lon,
+            current_alt,
+            float('nan')  # Maintain current heading
+        )
+        
+        logger.info(f"✓ Holding position at ({current_lat:.6f}, {current_lon:.6f}) @ {current_alt:.1f}m MSL")
+        
+        return {
+            "status": "success",
+            "message": "Drone holding position in GUIDED mode",
+            "position": {
+                "latitude_deg": current_lat,
+                "longitude_deg": current_lon,
+                "altitude_msl": current_alt,
+                "altitude_rel": position.relative_altitude_m
+            },
+            "note": "Using GUIDED mode instead of LOITER to prevent altitude drift"
+        }
     except Exception as e:
         logger.error(f"Hold position failed: {e}")
         return {"status": "failed", "error": f"Hold position failed: {str(e)}"}
