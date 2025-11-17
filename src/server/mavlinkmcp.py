@@ -46,23 +46,23 @@ from datetime import datetime
 
 # ANSI color codes for terminal output
 class LogColors:
-    """ANSI color codes for colored terminal output"""
+    """ANSI color codes for colored terminal output (dark/normal variants)"""
     RESET = '\033[0m'
     BOLD = '\033[1m'
     
-    # Colors
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
+    # Dark colors (3x codes) - easier to read than bright (9x codes)
+    RED = '\033[31m'      # Dark red
+    GREEN = '\033[32m'    # Dark green
+    YELLOW = '\033[33m'   # Dark yellow/orange
+    BLUE = '\033[34m'     # Dark blue
+    MAGENTA = '\033[35m'  # Dark magenta
+    CYAN = '\033[36m'     # Dark cyan
+    WHITE = '\033[37m'    # Light gray
     
-    # Combined styles
-    MAVLINK = '\033[96m'  # Cyan for MAVLink commands
-    TOOL = '\033[92m'     # Green for MCP tool calls
-    ERROR = '\033[91m'    # Red for errors
+    # Combined styles for specific log types
+    MAVLINK = '\033[36m'  # Dark cyan for MAVLink commands
+    TOOL = '\033[32m'     # Dark green for MCP tool calls
+    ERROR = '\033[31m'    # Dark red for errors
 
 class FlightLogger:
     """Logs flight operations to a timestamped file"""
