@@ -11,6 +11,17 @@ Fast validation of MAVLink MCP v1.2.3 features.
 
 ---
 
+## ⚠️ CRITICAL SAFETY NOTE
+
+**ALTITUDE REFERENCE:** All altitude commands in this test use **relative altitude** (height above home/ground), NOT absolute MSL altitude. The MCP server handles the conversion automatically.
+
+If you modify this test, be aware:
+- `takeoff`, `reposition`: Use relative altitude
+- Home elevation may vary (e.g., 25m MSL in SITL)
+- Never command altitudes below home elevation
+
+---
+
 ## Copy This Prompt Into ChatGPT
 
 ```
@@ -21,8 +32,8 @@ Quick inspection test:
 3. Run a health check
 4. Arm and takeoff to 10 meters
 5. Face north (0 degrees) to orient the camera
-6. Orbit around lat 33.6459, lon -117.8427 at 15 meter radius, 2 m/s, clockwise, at 15m altitude
-7. After 20 seconds, stop and reposition to lat 33.6460, lon -117.8428 at 20m
+6. Orbit around lat 33.6459, lon -117.8427 at 15 meter radius, 2 m/s, clockwise, staying at your current altitude
+7. After 20 seconds, stop and reposition to lat 33.6460, lon -117.8428, climb to 20m relative altitude
 8. Check battery level
 9. Create and upload (don't start) a 3-waypoint mission going north, east, then back
 10. Download the mission to verify

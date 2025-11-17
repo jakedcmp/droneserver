@@ -19,6 +19,14 @@ This test simulates a detailed cell tower inspection mission, exercising **all 3
 
 ---
 
+## ⚠️ CRITICAL SAFETY NOTE
+
+**ALTITUDE REFERENCE:** All altitude commands in this test use **relative altitude** (height above home/ground), NOT absolute MSL altitude. Commands like `reposition`, `orbit`, and `takeoff` automatically handle the conversion.
+
+**Never command underground altitudes!** Always ensure relative altitudes are positive values.
+
+---
+
 ## Copy This Prompt Into ChatGPT
 
 ```
@@ -45,12 +53,12 @@ PHASE 3 - FLIGHT OPERATIONS:
 9. Check our current position and battery level
 10. Fly to the first waypoint position (lat 33.6459, lon -117.8427) and hold there at 20m
 11. Rotate the drone to face due east (90 degrees) so the camera is pointing at the tower
-12. Now orbit around the tower base at a 25 meter radius, moving at 3 m/s, centered on lat 33.6460, lon -117.8427 at 25m altitude, going clockwise
+12. Now orbit around the tower base at a 25 meter radius, moving at 3 m/s, centered on lat 33.6460, lon -117.8427, staying at your current altitude, going clockwise
 13. After 30 seconds of orbiting, tell me what our current speed is
 14. Check the battery level again - if it's below 70%, I want you to warn me
 
 PHASE 4 - DETAILED INSPECTION:
-15. Stop the orbit and reposition to lat 33.6460, lon -117.8426 at 40m altitude to get a closer view of the upper tower section
+15. Stop the orbit and reposition to lat 33.6460, lon -117.8426, climb to 40m relative altitude to get a closer view of the upper tower section
 16. Face north (0 degrees) to align with the tower
 17. Get our current attitude (roll, pitch, yaw) to confirm we're level and facing the right direction
 
@@ -64,7 +72,7 @@ PHASE 5 - MISSION EXECUTION:
 
 PHASE 6 - RETURN AND LANDING:
 24. Once mission is complete, check battery one more time
-25. If battery is above 40%, orbit one more time around lat 33.6460, lon -117.8427 at 30m radius at 15m altitude, counter-clockwise at 2 m/s
+25. If battery is above 40%, orbit one more time around lat 33.6460, lon -117.8427 at 30m radius, at 15m relative altitude (descend if needed), counter-clockwise at 2 m/s
 26. Return to launch position
 27. Land the drone
 28. Disarm when safely on the ground
