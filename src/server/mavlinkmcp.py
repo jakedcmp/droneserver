@@ -466,11 +466,12 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
+    logger.info(f"Taking off to {takeoff_altitude}m AGL (relative altitude)")
     log_mavlink_cmd("drone.action.set_takeoff_altitude", altitude=takeoff_altitude)
     await drone.action.set_takeoff_altitude(takeoff_altitude)
     log_mavlink_cmd("drone.action.takeoff")
     await drone.action.takeoff()
-    return {"status": "success", "message": f"Takeoff initiated to {takeoff_altitude}m"}
+    return {"status": "success", "message": f"Takeoff initiated to {takeoff_altitude}m AGL (relative)"}
 
 @mcp.tool()
 async def land(ctx: Context) -> dict:
@@ -2091,10 +2092,9 @@ async def download_mission(ctx: Context) -> dict:
         - Mission debugging
     
     Note:
-        ArduPilot SITL and some firmware versions don't support mission download.
-        If download fails with "UNSUPPORTED", use mission_progress() to verify 
-        the mission exists and is_mission_finished() to monitor execution.
-        This is a firmware limitation, not a bug in the server.
+        Mission download may occasionally fail with "UNSUPPORTED" immediately after upload
+        due to ArduPilot mission state synchronization. If this happens, wait a moment and
+        try again, or use mission_progress() to verify the mission exists.
     """
     connector = ctx.request_context.lifespan_context
     
@@ -2105,22 +2105,24 @@ async def download_mission(ctx: Context) -> dict:
     drone = connector.drone
     logger.info("Downloading mission from drone")
     
-    # WORKAROUND: Check mission progress first to force ArduPilot to refresh mission state
-    # This resolves "Mission is stale" errors after upload
+    # Check mission progress first to verify mission exists
     try:
-        log_mavlink_cmd("drone.mission.get_mission_progress")
+        log_mavlink_cmd("drone.mission.mission_progress")
         async for progress in drone.mission.mission_progress():
-            logger.info(f"Mission has {progress.total} waypoints, currently at {progress.current}")
-            break  # Just need one reading to refresh state
+            logger.info(f"{LogColors.STATUS}Mission has {progress.total} waypoints, currently at {progress.current}{LogColors.RESET}")
+            if progress.total == 0:
+                return {
+                    "status": "failed",
+                    "error": "No mission on drone (mission count is 0)",
+                    "hint": "Upload a mission first using upload_mission"
+                }
+            break
     except Exception as e:
-        logger.warning(f"Could not check mission progress (may be expected): {e}")
+        logger.warning(f"Could not check mission progress: {e}")
     
-    # Wait a bit for mission state to settle after upload
-    await asyncio.sleep(1.0)
-    
-    # Try to download mission with retry logic (ArduPilot needs time to process uploads)
-    max_retries = 3
-    retry_delay = 1.0  # seconds (increased from 0.5)
+    # Try to download mission with proper retry logic
+    max_retries = 5  # Increased retries
+    retry_delay = 0.3  # Shorter, more frequent retries
     
     for attempt in range(max_retries):
         try:
@@ -2163,15 +2165,15 @@ async def download_mission(ctx: Context) -> dict:
             
             # Provide helpful error message
             if "UNSUPPORTED" in error_str.upper():
-                # Soft failure - mission exists but download not supported by this firmware/config
-                logger.warning(f"{LogColors.WARNING}Mission download not supported by autopilot (this is a firmware limitation, not a bug){LogColors.RESET}")
+                logger.error(f"{LogColors.ERROR}Mission download failed - ArduPilot may need mission state refresh{LogColors.RESET}")
                 return {
-                    "status": "partial_success", 
-                    "message": "Mission exists on drone but download not supported by autopilot firmware",
-                    "hint": "ArduPilot SITL often doesn't support mission download. Use mission_progress() to verify mission exists.",
-                    "workaround": "Mission was successfully uploaded. Use is_mission_finished() and mission_progress to monitor execution.",
+                    "status": "failed", 
+                    "error": "Mission download UNSUPPORTED by current autopilot state",
+                    "hint": "Try waiting a moment after upload, or use mission_progress() to verify mission exists",
+                    "mission_exists": "Mission was successfully uploaded and verified via mission_progress",
                     "attempts": attempt + 1,
-                    "note": "This is a known ArduPilot limitation, not a bug in the MCP server"
+                    "technical_error": error_str,
+                    "workaround": "Use is_mission_finished() to monitor mission execution even without download"
                 }
             else:
                 return {
