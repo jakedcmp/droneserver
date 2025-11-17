@@ -17,13 +17,20 @@ from pathlib import Path
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# Configure logger with enhanced format
+# Configure logger with enhanced format for both console and systemd
 logger = logging.getLogger("MAVLinkMCP")
 logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+
+# Console handler (for direct terminal use)
+console_handler = logging.StreamHandler()
+console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
+
+# Ensure output is unbuffered for systemd journalctl
+import sys
+sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
+sys.stderr.reconfigure(line_buffering=True) if hasattr(sys.stderr, 'reconfigure') else None
 
 def log_tool_call(tool_name: str, **kwargs):
     """Log MCP tool call with parameters"""
@@ -545,10 +552,15 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     logger.info("Uploading mission")
     await drone.mission.upload_mission(mission_plan)
 
-    logger.info("Starting mission")
+    log_mavlink_cmd("drone.mission.start_mission")
+    logger.info("⚠️  Mission starting - drone will switch to AUTO flight mode")
     await drone.mission.start_mission()
 
-    return {"status": "success", "message": f"Mission started with {len(mission_items)} waypoints"}
+    return {
+        "status": "success", 
+        "message": f"Mission started with {len(mission_items)} waypoints",
+        "note": "Flight mode automatically changed to AUTO for mission execution"
+    }
 
 @mcp.tool()
 async def get_flight_mode(ctx: Context) -> dict:
@@ -697,6 +709,7 @@ async def hold_position(ctx: Context) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
+    log_tool_call("hold_position")
     logger.info("Commanding drone to hold position (staying in GUIDED mode)")
     
     try:
@@ -708,6 +721,7 @@ async def hold_position(ctx: Context) -> dict:
         
         # Send goto_location with current position - keeps drone in GUIDED mode
         # This prevents the altitude drop that occurs when switching to LOITER mode
+        log_mavlink_cmd("drone.action.goto_location", lat=f"{current_lat:.6f}", lon=f"{current_lon:.6f}", alt=f"{current_alt:.1f}")
         await drone.action.goto_location(
             current_lat,
             current_lon,
@@ -884,11 +898,17 @@ async def pause_mission(ctx: Context) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
-    logger.info("Pausing mission")
+    log_tool_call("pause_mission")
     
     try:
+        log_mavlink_cmd("drone.mission.pause_mission")
+        logger.info("⚠️  Pausing mission - drone may switch to LOITER mode")
         await drone.mission.pause_mission()
-        return {"status": "success", "message": "Mission paused - use resume_mission to continue"}
+        return {
+            "status": "success", 
+            "message": "Mission paused - use resume_mission to continue",
+            "note": "Flight mode may have changed to LOITER (hold position)"
+        }
     except Exception as e:
         logger.error(f"Failed to pause mission: {e}")
         return {"status": "failed", "error": f"Mission pause failed: {str(e)}"}
@@ -913,11 +933,17 @@ async def resume_mission(ctx: Context) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
-    logger.info("Resuming mission")
+    log_tool_call("resume_mission")
     
     try:
+        log_mavlink_cmd("drone.mission.start_mission")
+        logger.info("⚠️  Resuming mission - drone will switch to AUTO flight mode")
         await drone.mission.start_mission()
-        return {"status": "success", "message": "Mission resumed"}
+        return {
+            "status": "success", 
+            "message": "Mission resumed",
+            "note": "Flight mode automatically changed to AUTO for mission execution"
+        }
     except Exception as e:
         logger.error(f"Failed to resume mission: {e}")
         return {"status": "failed", "error": f"Mission resume failed: {str(e)}"}
