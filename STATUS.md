@@ -19,12 +19,12 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 
 **Last Updated:** November 17, 2025  
 **Version:** 1.2.3 (with critical safety fix)  
-**Total Tools:** 36 MCP tools (1 deprecated for safety)  
+**Total Tools:** 35 MCP tools (1 deprecated for safety)  
 **Tested With:** ArduPilot, ChatGPT Developer Mode
 
 ---
 
-## 🎯 Available Tools (36 Total)
+## 🎯 Available Tools (35 Total)
 
 ### Basic Flight Control (5 tools)
 - ✅ `arm_drone` - Arm motors for flight
@@ -38,13 +38,12 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 - ✅ `kill_motors` - Emergency motor cutoff ⚠️
 - ✅ `get_battery` - Battery voltage & percentage monitoring
 
-### Navigation (8 tools)
+### Navigation (7 tools)
 - ✅ `get_position` - Current GPS coordinates & altitude
 - ✅ `move_to_relative` - Relative NED movement
 - ✅ `go_to_location` - Absolute GPS navigation
 - ✅ `get_home_position` - Home/RTL location
 - ✅ `set_max_speed` - Speed limiting for safety
-- ✅ `orbit_location` - **NEW** Circle around a point
 - ✅ `set_yaw` - **NEW** Set heading without moving
 - ✅ `reposition` - **NEW** Move to location and loiter
 
@@ -141,7 +140,6 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 - ✅ `list_parameters` - List all available parameters (implemented Nov 16, 2025)
 
 #### Advanced Navigation ✅ COMPLETE
-- ✅ `orbit_location` - Circle around a point (implemented Nov 16, 2025)
 - ✅ `set_yaw` - Set heading without moving (implemented Nov 16, 2025)
 - ✅ `reposition` - Move to location and loiter (implemented Nov 16, 2025)
 
@@ -294,15 +292,13 @@ The MAVLink MCP Server is **production-ready** with complete flight operations, 
 ### November 16, 2025 - v1.2.1 Patch: Error Handling & Compatibility ✅
 **Improved:** Based on comprehensive testing (67% success rate → better error messages)
 - Enhanced mission upload validation with clear format error messages
-- Orbit capability detection with firmware requirements and workarounds
 - Battery monitoring fallback for uncalibrated systems (voltage-based estimates)
 - Firmware compatibility matrix added to documentation
 
 ### November 16, 2025 - v1.2.0 Development: Advanced Navigation & Mission Enhancements ✅
-**Added:** 7 new tools for advanced flight control
+**Added:** 6 new tools for advanced flight control
 
-**Advanced Navigation (3 tools):**
-- `orbit_location` - Circle around a point at specified radius and speed
+**Advanced Navigation (2 tools):**
 - `set_yaw` - Rotate drone to face specific direction (with cardinal directions)
 - `reposition` - Move to location and loiter
 

@@ -195,8 +195,7 @@ MAVLink MCP works with all major autopilots, but some advanced features require 
 | **Basic Navigation** | ✅ All versions | ✅ All versions | GPS, waypoints, hold |
 | **Parameter Management** | ✅ All versions | ✅ All versions | Read/write all parameters |
 | **Mission Upload/Download** | ✅ 3.5+ | ✅ 1.10+ | Upload works everywhere |
-| **Advanced Navigation** | ⚠️ 4.0+ | ⚠️ 1.13+ | `orbit_location` requires newer firmware |
-| **Yaw Control** | ✅ All versions | ✅ All versions | Works on all versions |
+| **Advanced Navigation** | ✅ All versions | ✅ All versions | Yaw control and repositioning |
 | **Battery Monitoring** | ⚠️ Calibration needed | ⚠️ Calibration needed | Set `BATT_CAPACITY` for accurate readings |
 
 **✅ Recommended for Full v1.2.0 Support:**
@@ -205,8 +204,8 @@ MAVLink MCP works with all major autopilots, but some advanced features require 
 - **SITL Simulators:** Latest stable versions
 
 **⚠️ Limited Support:**
-- Older firmware (ArduPilot 3.x, PX4 1.10-1.12) works but `orbit_location` may fail
-- The server automatically detects unsupported features and provides workarounds
+- Older firmware (ArduPilot 3.x, PX4 1.10-1.12) works with core features
+- Mission upload/download requires ArduPilot 3.5+ or PX4 1.10+
 
 **🔍 Check Your Firmware:**
 - Use `get_telemetry` or `get_health` tools to check autopilot version
@@ -431,13 +430,13 @@ Start agent with auto-configuration:
 
 ## Available Tools
 
-The MCP server exposes **36 tools** for complete drone control:
+The MCP server exposes **35 tools** for complete drone control:
 
 | Category | Count | Key Tools |
 |----------|-------|-----------|
 | **Flight Control** | 5 | `arm_drone`, `disarm_drone`, `takeoff`, `land`, `hold_position` |
 | **Emergency & Safety** | 3 | `return_to_launch`, `kill_motors`, `get_battery` |
-| **Navigation** | 8 | `get_position`, `go_to_location`, `orbit_location` 🆕, `set_yaw` 🆕, `reposition` 🆕 |
+| **Navigation** | 7 | `get_position`, `go_to_location`, `set_yaw` 🆕, `reposition` 🆕, `move_to_relative` |
 | **Mission Management** | 10 | `initiate_mission`, `upload_mission` 🆕, `pause_mission`, `hold_mission_position` 🆕, `resume_mission` |
 | **Telemetry** | 7 | `get_health`, `get_speed`, `get_attitude`, `get_gps_info`, `get_armed` |
 | **Parameter Management** | 3 | `get_parameter`, `set_parameter`, `list_parameters` |
@@ -448,8 +447,8 @@ The MCP server exposes **36 tools** for complete drone control:
 - 🔴 **Nov 17, 2025**: v1.2.3 - **CRITICAL SAFETY FIX** - Deprecated `pause_mission()` due to crash risk (LOITER mode descent). Use `hold_mission_position()` instead.
 - ✅ **Nov 17, 2025**: v1.2.2 - Added `hold_mission_position` tool and enhanced mission diagnostics (pause without LOITER mode, better progress tracking)
 - ✅ **Nov 17, 2025**: Added automatic flight logging - all tool calls and MAVLink commands logged to timestamped files for debugging and auditing
-- ✅ **Nov 16, 2025**: v1.2.1 patch - improved error handling based on comprehensive testing (mission validation, orbit detection, battery fallback)
-- ✅ **Nov 16, 2025**: v1.2.0 near complete - added 7 tools for advanced navigation & missions (orbit, yaw, reposition, mission mgmt)
+- ✅ **Nov 16, 2025**: v1.2.1 patch - improved error handling based on comprehensive testing (mission validation, better error messages)
+- ✅ **Nov 16, 2025**: v1.2.0 - added 6 tools for advanced navigation & missions (yaw, reposition, mission upload/download/control)
 - ✅ **Nov 16, 2025**: v1.2.0 development - added 3 parameter management tools (get/set/list params)
 - ✅ **Nov 16, 2025**: Documentation cleanup - removed 4 redundant files, consolidated roadmap
 - ✅ **Nov 12, 2025**: v1.1.0 released with 15 new tools - critical safety features, health checks, advanced telemetry

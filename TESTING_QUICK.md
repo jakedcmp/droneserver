@@ -32,19 +32,20 @@ Quick inspection test:
 3. Run a health check
 4. Arm and takeoff to 10 meters
 5. Face north (0 degrees) to orient the camera
-6. Orbit around lat 33.6459, lon -117.8427 at 15 meter radius, 2 m/s, clockwise, staying at your current altitude
-7. After 20 seconds, stop and reposition to lat 33.6460, lon -117.8428, climb to 20m relative altitude
-8. Check battery level
-9. IMPORTANT: Use upload_mission (NOT initiate_mission) to create a 3-waypoint mission going north, east, then back (don't start it)
-10. Download the mission using download_mission to verify it was uploaded correctly
-11. Check if any mission is currently running (should be false)
-12. Return to launch and land
-13. Disarm
+6. Fly to lat 33.6459, lon -117.8427 staying at your current altitude
+7. Face east (90 degrees) and hold position for 10 seconds
+8. Reposition to lat 33.6460, lon -117.8428, climb to 20m relative altitude
+9. Check battery level
+10. IMPORTANT: Use upload_mission (NOT initiate_mission) to create a 3-waypoint mission going north, east, then back (don't start it)
+11. Download the mission using download_mission to verify it was uploaded correctly
+12. Check if any mission is currently running (should be false)
+13. Return to launch and land
+14. Disarm
 
 Execute this step by step and report status after each action.
 
 After completing all steps, create a summary report:
-- Total steps completed: X/13
+- Total steps completed: X/14
 - Steps that succeeded: [list]
 - Steps that failed: [list with reasons]
 - Battery used: X%
@@ -63,8 +64,8 @@ After completing all steps, create a summary report:
 - ✅ `set_parameter` - Modify RTL altitude if needed
 
 ### Advanced Navigation (v1.2.0)
-- ✅ `set_yaw` - Face north (0°)
-- ✅ `orbit_location` - Circle at 15m radius
+- ✅ `set_yaw` - Face north (0°) and east (90°)
+- ✅ `go_to_location` - Navigate to GPS coordinates
 - ✅ `reposition` - Move to new position and hold
 
 ### Mission Enhancements (v1.2.0)
@@ -85,11 +86,11 @@ After completing all steps, create a summary report:
 
 ## Expected Results
 
-✅ **All 13 steps should complete successfully**
+✅ **All 14 steps should complete successfully**
 
 Common variations:
-- Orbit may not be supported (firmware limitation) - workaround provided
 - Download mission may not be supported (some autopilots) - keep local copy
+- Battery readings may be uncalibrated - set BATT_CAPACITY parameter
 - Battery percentage may be estimated (uncalibrated sensor) - voltage still reported
 
 ---

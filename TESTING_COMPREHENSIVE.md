@@ -21,7 +21,7 @@ This test simulates a detailed cell tower inspection mission, exercising **all 3
 
 ## ⚠️ CRITICAL SAFETY NOTE
 
-**ALTITUDE REFERENCE:** All altitude commands in this test use **relative altitude** (height above home/ground), NOT absolute MSL altitude. Commands like `reposition`, `orbit`, and `takeoff` automatically handle the conversion.
+**ALTITUDE REFERENCE:** All altitude commands in this test use **relative altitude** (height above home/ground), NOT absolute MSL altitude. Commands like `reposition`, `go_to_location`, and `takeoff` automatically handle the conversion.
 
 **Never command underground altitudes!** Always ensure relative altitudes are positive values.
 
@@ -53,33 +53,35 @@ PHASE 3 - FLIGHT OPERATIONS:
 9. Check our current position and battery level
 10. Fly to the first waypoint position (lat 33.6459, lon -117.8427) and hold there at 20m
 11. Rotate the drone to face due east (90 degrees) so the camera is pointing at the tower
-12. Now orbit around the tower base at a 25 meter radius, moving at 3 m/s, centered on lat 33.6460, lon -117.8427, staying at your current altitude, going clockwise
-13. After 30 seconds of orbiting, tell me what our current speed is
-14. Check the battery level again - if it's below 70%, I want you to warn me
+12. Fly to lat 33.6459, lon -117.8425 (west side of tower) staying at your current altitude
+13. Rotate to face the tower (face east at 90 degrees) and hold position for 10 seconds
+14. Now fly to lat 33.6461, lon -117.8427 (east side of tower), staying at same altitude
+15. Rotate to face west (270 degrees) toward the tower and hold for 10 seconds
+16. Tell me what our current speed is
+17. Check the battery level again - if it's below 70%, I want you to warn me
 
 PHASE 4 - DETAILED INSPECTION:
-15. Stop the orbit and reposition to lat 33.6460, lon -117.8426, climb to 40m relative altitude to get a closer view of the upper tower section
-16. Face north (0 degrees) to align with the tower
-17. Get our current attitude (roll, pitch, yaw) to confirm we're level and facing the right direction
+19. Reposition to lat 33.6460, lon -117.8426, climb to 40m relative altitude to get a closer view of the upper tower section
+20. Face north (0 degrees) to align with the tower
+21. Get our current attitude (roll, pitch, yaw) to confirm we're level and facing the right direction
 
 PHASE 5 - MISSION EXECUTION:
-18. Now start the 4-waypoint mission we uploaded earlier
-19. Monitor the mission and tell me when we reach waypoint 2
-20. At waypoint 2, use hold_mission_position to pause safely (do NOT use pause_mission - it's deprecated)
-21. Check if the mission is finished (it shouldn't be since we paused it)
-22. Resume the mission and let it continue
-23. Keep checking until the mission is finished
+22. Now start the 4-waypoint mission we uploaded earlier
+23. Monitor the mission and tell me when we reach waypoint 2
+24. At waypoint 2, use hold_mission_position to pause safely (do NOT use pause_mission - it's deprecated)
+25. Check if the mission is finished (it shouldn't be since we paused it)
+26. Resume the mission and let it continue
+27. Keep checking until the mission is finished
 
 PHASE 6 - RETURN AND LANDING:
-24. Once mission is complete, check battery one more time
-25. If battery is above 40%, orbit one more time around lat 33.6460, lon -117.8427 at 30m radius, at 15m relative altitude (descend if needed), counter-clockwise at 2 m/s
-26. Return to launch position
-27. Land the drone
-28. Disarm when safely on the ground
+28. Once mission is complete, check battery one more time
+29. Return to launch position
+30. Land the drone
+31. Disarm when safely on the ground
 
 PHASE 7 - POST-FLIGHT:
-29. Download the mission from the drone one more time to save it
-30. Show me all parameters that changed during the flight (compare with initial values)
+32. Download the mission from the drone one more time to save it
+33. Show me all parameters that changed during the flight (compare with initial values)
 
 Please execute this entire inspection mission step by step, confirming each action before moving to the next. Warn me immediately if any step fails or if battery gets critically low.
 
@@ -91,7 +93,7 @@ After completing all phases, please create a detailed report with:
 
 **1. Mission Summary:**
    - Total phases completed: X/7
-   - Total operations performed: X/30
+   - Total operations performed: X/33
    - Flight time: X minutes
    - Battery consumed: X%
    - Final location: [coordinates]
@@ -115,7 +117,7 @@ After completing all phases, please create a detailed report with:
 
 **5. New Features Performance (v1.2.0+):**
    - Parameter management: ✅/❌ [notes]
-   - Advanced navigation (orbit, yaw, reposition): ✅/❌ [notes]
+   - Advanced navigation (yaw, reposition): ✅/❌ [notes]
    - Mission enhancements: ✅/❌ [notes]
    - hold_mission_position (v1.2.2): ✅/❌ [notes]
 
@@ -148,8 +150,8 @@ Format this report clearly with sections and bullet points for easy reading.
 - ✅ `set_parameter` - Modify RTL altitude if needed
 
 ### Advanced Navigation (v1.2.0)
-- ✅ `orbit_location` - Circle tower at 25m radius (clockwise then counter-clockwise)
-- ✅ `set_yaw` - Face east (90°), then north (0°)
+- ✅ `go_to_location` - Navigate to multiple tower positions
+- ✅ `set_yaw` - Face east (90°), north (0°), and west (270°)
 - ✅ `reposition` - Move to inspection position and hold
 
 ### Mission Enhancements (v1.2.0)
@@ -179,7 +181,7 @@ Format this report clearly with sections and bullet points for easy reading.
 ✅ ChatGPT sequences actions logically  
 ✅ All 36 tools (except deprecated pause_mission) are called appropriately  
 ✅ Parameters read/write correctly  
-✅ Orbit executes smoothly (or provides firmware workaround)  
+✅ Navigation to multiple GPS points works smoothly  
 ✅ Yaw control shows cardinal directions  
 ✅ Mission upload/download cycle completes  
 ✅ **hold_mission_position works in GUIDED mode (no altitude drift)**  
@@ -204,8 +206,8 @@ Format this report clearly with sections and bullet points for easy reading.
 - Adjust lat/lon for your test location
 - Use relative coordinates from current position
 
-**Orbit not working:**
-- Normal for older firmware (ArduPilot < 4.0, PX4 < 1.13)
+**Navigation issues:**
+- Check GPS lock is good (3D fix with 6+ satellites)
 - Error message provides waypoint-based workaround
 
 **Mission upload format errors:**
