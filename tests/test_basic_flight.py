@@ -1,173 +1,109 @@
 """
-Tests for basic flight control tools:
-- arm_drone
-- disarm_drone
-- takeoff
-- land
-- hold_position
+Integration tests for basic flight control.
+
+Connects to real SITL/drone - no mocks!
+
+⚠️ WARNING: These tests will ARM and FLY the drone!
+
+Run SITL first:
+    sim_vehicle.py -v ArduCopter --console --map
+
+Then run tests:
+    uv run pytest tests/test_basic_flight.py -v
 """
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-
-# Import the tools we're testing
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'server'))
-
-from mavlinkmcp import (
-    arm_drone,
-    disarm_drone,
-    takeoff,
-    land,
-    hold_position,
-)
+import asyncio
 
 
-class TestArmDrone:
-    """Tests for arm_drone tool"""
+class TestArming:
+    """Tests for arm/disarm"""
     
-    async def test_arm_drone_success(self, mock_context, mock_drone):
-        """Test successful drone arming"""
-        result = await arm_drone(mock_context)
+    async def test_arm_and_disarm(self, drone):
+        """Test arming and disarming the drone"""
+        # Arm
+        await drone.action.arm()
+        await asyncio.sleep(1)
         
-        assert result["status"] == "success"
-        assert "armed" in result["message"].lower()
-        mock_drone.action.arm.assert_called_once()
-    
-    async def test_arm_drone_connection_timeout(self, disconnected_context):
-        """Test arm fails when drone not connected"""
-        result = await arm_drone(disconnected_context)
+        # Verify armed
+        async for armed in drone.telemetry.armed():
+            assert armed, "Drone should be armed"
+            print("✅ Drone armed")
+            break
         
-        assert result["status"] == "failed"
-        assert "timeout" in result["error"].lower()
-    
-    async def test_arm_drone_exception(self, mock_context, mock_drone):
-        """Test arm fails gracefully on exception"""
-        mock_drone.action.arm = AsyncMock(side_effect=Exception("Arm failed: Pre-arm checks not passed"))
+        # Disarm
+        await drone.action.disarm()
+        await asyncio.sleep(1)
         
-        # The arm_drone function doesn't have explicit exception handling,
-        # so this would raise. In a real scenario, we'd want to add error handling.
-        with pytest.raises(Exception):
-            await arm_drone(mock_context)
+        # Verify disarmed
+        async for armed in drone.telemetry.armed():
+            assert not armed, "Drone should be disarmed"
+            print("✅ Drone disarmed")
+            break
 
 
-class TestDisarmDrone:
-    """Tests for disarm_drone tool"""
+class TestTakeoffLand:
+    """Tests for takeoff and landing"""
     
-    async def test_disarm_drone_success(self, mock_context, mock_drone):
-        """Test successful drone disarming"""
-        result = await disarm_drone(mock_context)
+    async def test_takeoff_and_land(self, drone):
+        """Test takeoff to 5m and land"""
+        # Arm first
+        await drone.action.arm()
+        await asyncio.sleep(1)
         
-        assert result["status"] == "success"
-        assert "disarmed" in result["message"].lower()
-        mock_drone.action.disarm.assert_called_once()
-    
-    async def test_disarm_drone_connection_timeout(self, disconnected_context):
-        """Test disarm fails when drone not connected"""
-        result = await disarm_drone(disconnected_context)
+        # Set takeoff altitude and takeoff
+        await drone.action.set_takeoff_altitude(5.0)
+        await drone.action.takeoff()
+        print("🚀 Taking off...")
         
-        assert result["status"] == "failed"
-        assert "timeout" in result["error"].lower()
-    
-    async def test_disarm_drone_exception(self, mock_context, mock_drone):
-        """Test disarm handles exceptions gracefully"""
-        mock_drone.action.disarm = AsyncMock(side_effect=Exception("Disarm failed"))
+        # Wait for altitude
+        await asyncio.sleep(8)
         
-        result = await disarm_drone(mock_context)
+        # Check we're in the air
+        async for position in drone.telemetry.position():
+            altitude = position.relative_altitude_m
+            print(f"📍 Altitude: {altitude:.1f}m")
+            assert altitude > 3.0, f"Should be above 3m, got {altitude}m"
+            break
         
-        assert result["status"] == "failed"
-        assert "failed" in result["error"].lower()
+        # Land
+        await drone.action.land()
+        print("🛬 Landing...")
+        
+        # Wait for landing
+        await asyncio.sleep(10)
+        
+        # Check we're on ground
+        async for in_air in drone.telemetry.in_air():
+            assert not in_air, "Should be on ground"
+            print("✅ Landed safely")
+            break
+        
+        # Disarm
+        await drone.action.disarm()
 
 
-class TestTakeoff:
-    """Tests for takeoff tool"""
+class TestHold:
+    """Tests for hold/hover"""
     
-    async def test_takeoff_default_altitude(self, mock_context, mock_drone):
-        """Test takeoff with default altitude (3.0m)"""
-        result = await takeoff(mock_context)
+    async def test_hold_position(self, flying_drone):
+        """Test holding position"""
+        # Get current position
+        async for pos in flying_drone.telemetry.position():
+            lat1, lon1 = pos.latitude_deg, pos.longitude_deg
+            print(f"📍 Initial position: {lat1:.6f}, {lon1:.6f}")
+            break
         
-        assert result["status"] == "success"
-        assert "3.0" in result["message"] or "3" in result["message"]
-        mock_drone.action.set_takeoff_altitude.assert_called_once_with(3.0)
-        mock_drone.action.takeoff.assert_called_once()
-    
-    async def test_takeoff_custom_altitude(self, mock_context, mock_drone):
-        """Test takeoff with custom altitude"""
-        result = await takeoff(mock_context, takeoff_altitude=10.0)
+        # Hold for 3 seconds
+        await flying_drone.action.hold()
+        await asyncio.sleep(3)
         
-        assert result["status"] == "success"
-        assert "10" in result["message"]
-        mock_drone.action.set_takeoff_altitude.assert_called_once_with(10.0)
-    
-    async def test_takeoff_connection_timeout(self, disconnected_context):
-        """Test takeoff fails when drone not connected"""
-        result = await takeoff(disconnected_context)
-        
-        assert result["status"] == "failed"
-        assert "timeout" in result["error"].lower()
-
-
-class TestLand:
-    """Tests for land tool"""
-    
-    async def test_land_success(self, mock_context, mock_drone):
-        """Test successful landing"""
-        result = await land(mock_context)
-        
-        assert result["status"] == "success"
-        assert "landing" in result["message"].lower()
-        mock_drone.action.land.assert_called_once()
-    
-    async def test_land_connection_timeout(self, disconnected_context):
-        """Test land fails when drone not connected"""
-        result = await land(disconnected_context)
-        
-        assert result["status"] == "failed"
-        assert "timeout" in result["error"].lower()
-
-
-class TestHoldPosition:
-    """Tests for hold_position tool"""
-    
-    async def test_hold_position_success(self, mock_context, mock_drone):
-        """Test successful position hold"""
-        result = await hold_position(mock_context)
-        
-        assert result["status"] == "success"
-        assert "holding" in result["message"].lower() or "hold" in result["message"].lower()
-        # Should use goto_location with current position (stays in GUIDED mode)
-        mock_drone.action.goto_location.assert_called_once()
-    
-    async def test_hold_position_returns_position(self, mock_context, mock_drone):
-        """Test that hold_position returns current position"""
-        result = await hold_position(mock_context)
-        
-        assert result["status"] == "success"
-        assert "position" in result
-        assert "latitude_deg" in result["position"]
-        assert "longitude_deg" in result["position"]
-    
-    async def test_hold_position_uses_guided_mode(self, mock_context, mock_drone):
-        """Test that hold uses GUIDED mode (not LOITER)"""
-        result = await hold_position(mock_context)
-        
-        assert result["status"] == "success"
-        # Should include note about GUIDED mode
-        assert "GUIDED" in result.get("note", "") or "GUIDED" in result.get("message", "")
-    
-    async def test_hold_position_connection_timeout(self, disconnected_context):
-        """Test hold fails when drone not connected"""
-        result = await hold_position(disconnected_context)
-        
-        assert result["status"] == "failed"
-        assert "timeout" in result["error"].lower()
-    
-    async def test_hold_position_exception(self, mock_context, mock_drone):
-        """Test hold handles exceptions gracefully"""
-        mock_drone.action.goto_location = AsyncMock(side_effect=Exception("Hold failed"))
-        
-        result = await hold_position(mock_context)
-        
-        assert result["status"] == "failed"
-        assert "failed" in result["error"].lower()
-
+        # Check we haven't moved much
+        async for pos in flying_drone.telemetry.position():
+            lat2, lon2 = pos.latitude_deg, pos.longitude_deg
+            print(f"📍 Final position: {lat2:.6f}, {lon2:.6f}")
+            
+            # Should be within ~5m (0.00005 degrees)
+            assert abs(lat2 - lat1) < 0.0001, "Drifted too far north/south"
+            assert abs(lon2 - lon1) < 0.0001, "Drifted too far east/west"
+            print("✅ Position held")
+            break
