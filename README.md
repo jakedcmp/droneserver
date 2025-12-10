@@ -38,6 +38,38 @@ You: "Perfect. Land the drone safely"
 ChatGPT: "Landing... 10m... 5m... 1m... Landed successfully!"
 ```
 
+### 📋 Recommended Prompt for Navigation
+
+When flying to a destination, use this prompt to ensure ChatGPT waits for arrival before landing:
+
+```
+Arm the drone, takeoff to 50 meters, and fly to [YOUR DESTINATION ADDRESS/COORDINATES].
+
+After sending go_to_location, call check_arrival with the target coordinates to see the distance.
+
+If check_arrival returns "in_progress", wait a few seconds and call check_arrival again.
+
+Keep calling check_arrival until it returns "arrived" status.
+
+Only land after check_arrival confirms "arrived".
+```
+
+**Example with a real destination:**
+```
+Arm the drone, takeoff to 50 meters, and fly to the Chevron gas station 
+at 5301 University Dr, Irvine, CA (33.6516, -117.8270).
+
+After flying to the location, call check_arrival with coordinates (33.6516, -117.8270).
+
+If check_arrival returns "in_progress", wait a few seconds and call it again.
+
+Keep calling check_arrival until it returns "arrived" status.
+
+Only land after check_arrival confirms "arrived".
+```
+
+**Why this matters:** Without `check_arrival`, ChatGPT may send the `land` command immediately after `go_to_location`, causing the drone to land before reaching its destination.
+
 **Setup Steps:**
 1. Enable **Developer Mode** in ChatGPT settings (ChatGPT Plus/Pro required)
 2. Start the HTTP MCP server: `./start_http_server.sh`
