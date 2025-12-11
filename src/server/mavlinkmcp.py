@@ -1852,26 +1852,45 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
                             current_alt = position.relative_altitude_m
                             break
                         
+                        async for in_air in drone.telemetry.in_air():
+                            is_in_air = in_air
+                            break
+                        
                         landed_state_str = str(landed_state).split(".")[-1]
                         
-                        if landed_state_str == "ON_GROUND" or current_alt < 0.5:
-                            # Successfully landed!
-                            connector.landing_in_progress = False
-                            total_flight_time = asyncio.get_event_loop().time() - start_time
+                        # Only consider landed when PX4 reports ON_GROUND AND not in air AND altitude < 2m
+                        if landed_state_str == "ON_GROUND" and not is_in_air and current_alt < 2.0:
+                            # Wait 3 more seconds to confirm stable on ground
+                            logger.info(f"🛬 Touchdown detected, confirming stable...")
+                            await asyncio.sleep(3)
                             
-                            logger.info(f"{LogColors.SUCCESS}✅ LANDED! Flight complete.{LogColors.RESET}")
-                            get_flight_logger().log_entry("LANDED", "Mission complete")
+                            # Re-check to confirm
+                            async for state in drone.telemetry.landed_state():
+                                landed_state = state
+                                break
+                            async for in_air in drone.telemetry.in_air():
+                                is_in_air = in_air
+                                break
                             
-                            result = {
-                                "DISPLAY_TO_USER": f"✅ MISSION COMPLETE | Landed safely | Flight time: {total_flight_time:.0f}s",
-                                "status": "landed",
-                                "flight_time_seconds": round(total_flight_time, 0),
-                                "mission_complete": True
-                            }
-                            log_tool_output(result)
-                            return result
+                            landed_state_str = str(landed_state).split(".")[-1]
+                            if landed_state_str == "ON_GROUND" and not is_in_air:
+                                # Confirmed landed!
+                                connector.landing_in_progress = False
+                                total_flight_time = asyncio.get_event_loop().time() - start_time
+                                
+                                logger.info(f"{LogColors.SUCCESS}✅ LANDED! Flight complete.{LogColors.RESET}")
+                                get_flight_logger().log_entry("LANDED", "Mission complete")
+                                
+                                result = {
+                                    "DISPLAY_TO_USER": f"✅ MISSION COMPLETE | Landed safely | Flight time: {total_flight_time:.0f}s",
+                                    "status": "landed",
+                                    "flight_time_seconds": round(total_flight_time, 0),
+                                    "mission_complete": True
+                                }
+                                log_tool_output(result)
+                                return result
                         
-                        logger.info(f"🛬 Landing... altitude: {current_alt:.1f}m")
+                        logger.info(f"🛬 Landing... altitude: {current_alt:.1f}m, state: {landed_state_str}, in_air: {is_in_air}")
                         await asyncio.sleep(2)  # Check every 2 seconds
                     
                     # Timeout - return landing status
