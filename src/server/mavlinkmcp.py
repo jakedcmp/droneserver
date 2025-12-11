@@ -1758,6 +1758,7 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
                     "DISPLAY_TO_USER": f"🛬 LANDING | Alt: {current_alt:.1f}m | Descending...",
                     "status": "landing",
                     "altitude_m": round(current_alt, 1),
+                    "action_required": "call monitor_flight again",
                     "mission_complete": False
                 }
                 log_tool_output(result)
@@ -1842,6 +1843,7 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
                         "status": "landing",
                         "distance_m": round(distance, 1),
                         "altitude_m": round(current_alt, 1),
+                        "action_required": "call monitor_flight again",
                         "mission_complete": False
                     }
                     log_tool_output(result)
@@ -1879,6 +1881,7 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
             "status": "in_progress",
             "distance_m": round(distance, 1),
             "progress_percent": round(progress, 0),
+            "action_required": "call monitor_flight again",
             "mission_complete": False
         }
         log_tool_output(result)
