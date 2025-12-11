@@ -125,7 +125,7 @@ The MAVLink MCP Server is **production-ready** with complete autonomous flight f
 - ✅ `get_position` - Current GPS coordinates & altitude
 - ✅ `move_to_relative` - Relative NED movement
 - ✅ `go_to_location` - Absolute GPS navigation (returns immediately, registers destination)
-- ✅ `monitor_flight` - **NEW** Real-time flight updates (5s, returns DISPLAY_TO_USER for user)
+- ✅ `monitor_flight` - Real-time flight updates (30s intervals, auto-lands, waits for touchdown)
 - ✅ `get_home_position` - Home/RTL location
 - ✅ `set_max_speed` - Speed limiting for safety
 - ✅ `set_yaw` - Set heading without moving
@@ -335,18 +335,19 @@ The MAVLink MCP Server is **production-ready** with complete autonomous flight f
 
 ## 📊 Version Comparison
 
-| Feature | v1.0.0 | v1.1.0 | v1.2.0 | v1.3.0 (Planned) |
-|---------|--------|--------|--------|------------------|
-| **Total Tools** | 10 | 25 | 35 | 40 (planned) |
-| **Safety Tools** | 1 | 5 | 5 | 5 |
-| **Complete Flight Cycle** | ❌ | ✅ | ✅ | ✅ |
-| **Emergency Procedures** | ❌ | ✅ | ✅ | ✅ |
-| **Battery Monitoring** | ❌ | ✅ | ✅ | ✅ |
-| **Parameter Access** | ❌ | ❌ | ✅ | ✅ |
-| **Advanced Navigation** | ❌ | ❌ | ✅ | ✅ |
-| **Mission Enhancements** | Basic | Basic | Advanced | Advanced |
-| **Enhanced Telemetry** | ❌ | ❌ | ❌ | ✅ **NEW** |
-| **Production Ready** | ❌ | ✅ | ✅ | ✅ |
+| Feature | v1.0.0 | v1.1.0 | v1.2.0 | v1.3.0 | v1.4.0 |
+|---------|--------|--------|--------|--------|--------|
+| **Total Tools** | 10 | 25 | 35 | 40 | 41 |
+| **Safety Tools** | 1 | 5 | 5 | 5 | 5 |
+| **Complete Flight Cycle** | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Emergency Procedures** | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Battery Monitoring** | ❌ | ✅ | ✅ | ✅ | ✅ |
+| **Parameter Access** | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Advanced Navigation** | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Enhanced Telemetry** | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **Flight Monitoring** | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **Auto-Land + Touchdown Wait** | ❌ | ❌ | ❌ | ❌ | ✅ **NEW** |
+| **Production Ready** | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
@@ -365,11 +366,18 @@ The MAVLink MCP Server is **production-ready** with complete autonomous flight f
 - ✅ Professional pilot feature set
 - ✅ Enhanced navigation capabilities
 
-### v1.3.0 Goals
-- [ ] Complete telemetry coverage (health_all_ok, landed_state, rc_status, heading, odometry)
-- [ ] Enhanced monitoring capabilities for AI agents
-- [ ] Better safety checks with RC status monitoring
-- [ ] Improved flight state awareness
+### v1.3.0 Goals: ✅ ACHIEVED
+- ✅ Complete telemetry coverage (health_all_ok, landed_state, rc_status, heading, odometry)
+- ✅ Enhanced monitoring capabilities for AI agents
+- ✅ Better safety checks with RC status monitoring
+- ✅ Improved flight state awareness
+
+### v1.4.0 Goals: ✅ ACHIEVED
+- ✅ Complete flight lifecycle management (arm → fly → land → confirmed touchdown)
+- ✅ Auto-land waits for drone to physically touch ground
+- ✅ 30-second update intervals to prevent ChatGPT tool call limits
+- ✅ Robust landing detection (ON_GROUND + not in_air + altitude < 2m + 3s stability)
+- ✅ LLM cannot override update interval (hardcoded)
 
 ### v2.0.0 Goals
 - ✅ Autonomous survey missions
@@ -380,6 +388,49 @@ The MAVLink MCP Server is **production-ready** with complete autonomous flight f
 ---
 
 ## 🔧 Recent Changes
+
+### December 11, 2025 - v1.4.0: 🚁 Complete Flight Lifecycle Management ✅
+**Major Release:** The drone now physically lands before `mission_complete` returns.
+
+**Key Features:**
+- **Confirmed Touchdown:** `monitor_flight` waits for drone to physically land (up to 120s)
+- **30-Second Updates:** Reduced from 5s to prevent ChatGPT tool call limits
+- **Robust Landing Detection:** Requires ON_GROUND + not in_air + altitude < 2m + 3s stability
+- **Hardcoded Interval:** LLM cannot override the 30-second update interval
+- **Bug Fixes:** Fixed LogColors.CMD typo that caused crashes at arrival
+
+**Flight Lifecycle:**
+1. `takeoff()` - waits for target altitude
+2. `go_to_location()` - registers destination, returns immediately
+3. `monitor_flight()` loop - 30s updates, auto-lands when arrived, waits for touchdown
+4. Returns `mission_complete: true` only when drone is on ground
+
+**Recommended Prompt:**
+```
+Arm the drone, takeoff to 50 meters, fly to [DESTINATION], and land.
+After each monitor_flight, you MUST print the DISPLAY_TO_USER value.
+You MUST call monitor_flight at least 20 times or until mission_complete is true.
+```
+
+---
+
+### December 10, 2025 - v1.3.1: Flight Monitoring + Landing Gate ✅
+**Added:** `monitor_flight` tool and Landing Gate safety feature
+- Real-time flight progress updates with DISPLAY_TO_USER
+- Landing Gate blocks landing if drone is >20m from destination
+- Destination tracking via pending_destination
+
+---
+
+### December 10, 2025 - v1.3.0: Enhanced Telemetry ✅
+**Added:** 5 new telemetry tools
+- `get_health_all_ok` - Quick go/no-go health check
+- `get_landed_state` - Detailed state (on ground/taking off/in air/landing)
+- `get_rc_status` - RC controller connection and signal strength
+- `get_heading` - Compass heading in degrees
+- `get_odometry` - Combined position, velocity, orientation
+
+---
 
 ### November 17, 2025 - v1.2.4: 🎨 Logging & Code Cleanup ✅
 **Improved:** JSON logging, transparency, and code quality
