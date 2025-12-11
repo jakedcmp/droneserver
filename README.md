@@ -40,18 +40,14 @@ ChatGPT: "Landing... 10m... 5m... 1m... Landed successfully!"
 
 ### 📋 Recommended Prompt for Navigation
 
-When flying to a destination, use this prompt to ensure ChatGPT waits for arrival before landing:
+When flying to a destination, use `monitor_flight()` to track progress:
 
 ```
-Arm the drone, takeoff to 50 meters, and fly to [YOUR DESTINATION ADDRESS/COORDINATES].
+Arm the drone, takeoff to 50 meters, and fly to [YOUR DESTINATION].
 
-After sending go_to_location, call check_arrival with the target coordinates to see the distance.
-
-If check_arrival returns "in_progress", wait a few seconds and call check_arrival again.
-
-Keep calling check_arrival until it returns "arrived" status.
-
-Only land after check_arrival confirms "arrived".
+After go_to_location, call monitor_flight() to track progress.
+If still in progress, call monitor_flight() again.
+Repeat until arrived, then land.
 ```
 
 **Example with a real destination:**
@@ -59,14 +55,10 @@ Only land after check_arrival confirms "arrived".
 Arm the drone, takeoff to 50 meters, and fly to the Chevron gas station 
 at 5301 University Dr, Irvine, CA (33.6516, -117.8270).
 
-After flying to the location, call check_arrival with coordinates (33.6516, -117.8270).
-
-If check_arrival returns "in_progress", wait a few seconds and call it again.
-
-Keep calling check_arrival until it returns "arrived" status.
-
-Only land after check_arrival confirms "arrived".
+Use monitor_flight() to track progress until arrived, then land.
 ```
+
+**Safety Note:** Even if you forget to monitor, the **Landing Gate** will block landing if the drone hasn't reached its destination. You'll see: "Cannot land - drone is 1.2km from destination!"
 
 **Why this matters:** Without `check_arrival`, ChatGPT may send the `land` command immediately after `go_to_location`, causing the drone to land before reaching its destination.
 

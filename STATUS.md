@@ -12,6 +12,30 @@ During flight testing, `pause_mission()` caused a **drone crash** by descending 
 
 ---
 
+## 🛡️ Safety Features (v1.3.1)
+
+### Landing Gate
+The `land()` function includes a **Landing Gate** that prevents unsafe landings:
+- If you called `go_to_location()`, the destination is tracked
+- If you try to `land()` before arriving (>20m from destination), landing is **BLOCKED**
+- You'll see: `"Cannot land - drone is 1.2km from destination!"`
+- Use `land(force=True)` only for emergencies
+
+### Takeoff Altitude Wait
+The `takeoff()` function waits until the drone reaches target altitude before returning. This prevents navigation commands from being sent while still climbing.
+
+### Chunked Flight Monitoring
+Use `monitor_flight()` to track long flights in 30-second chunks:
+```
+go_to_location() → returns immediately
+monitor_flight() → "In progress: 1.8km (28% complete)"
+monitor_flight() → "In progress: 0.5km (80% complete)"  
+monitor_flight() → "Arrived! Safe to land."
+land() → succeeds
+```
+
+---
+
 ## ✅ Current Status (v1.3.1 - Chunked Flight Monitoring)
 
 ### Production Ready with Enhanced Safety
