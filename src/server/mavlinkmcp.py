@@ -485,17 +485,25 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
         return {"status": "failed", "error": f"Movement failed: {str(e)}"}
 
 @mcp.tool()
-async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
-    """Command the drone to initiate takeoff and ascend to a specified altitude. The drone must be armed. Waits for connection if not ready.
+async def takeoff(ctx: Context, takeoff_altitude: float = 3.0, wait_for_altitude: bool = True) -> dict:
+    """Command the drone to initiate takeoff and ascend to a specified altitude. 
+    The drone must be armed. Waits for connection if not ready.
+    
+    IMPORTANT: By default, this function waits until the drone reaches the target 
+    altitude before returning. This prevents unsafe conditions where subsequent 
+    navigation commands are sent while the drone is still climbing.
 
     Args:
         ctx (Context): The context of the request.
         takeoff_altitude (float): The altitude to ascend to after takeoff. Default is 3.0 meters.
+        wait_for_altitude (bool): If True (default), waits until drone reaches target altitude.
+                                  Set to False only if you need immediate return and will
+                                  monitor altitude manually before sending navigation commands.
 
     Returns:
-        dict: Status message with success or error.
+        dict: Status message with success or error, including final altitude reached.
     """
-    log_tool_call("takeoff", takeoff_altitude=takeoff_altitude)
+    log_tool_call("takeoff", takeoff_altitude=takeoff_altitude, wait_for_altitude=wait_for_altitude)
     connector = ctx.request_context.lifespan_context
     
     # Wait for connection
@@ -508,7 +516,61 @@ async def takeoff(ctx: Context, takeoff_altitude: float = 3.0) -> dict:
     await drone.action.set_takeoff_altitude(takeoff_altitude)
     log_mavlink_cmd("drone.action.takeoff")
     await drone.action.takeoff()
-    return {"status": "success", "message": f"Takeoff initiated to {takeoff_altitude}m AGL (relative)"}
+    
+    if not wait_for_altitude:
+        return {
+            "status": "success", 
+            "message": f"Takeoff initiated to {takeoff_altitude}m AGL (relative)",
+            "warning": "⚠️ Takeoff in progress - do NOT send navigation commands until altitude is reached!"
+        }
+    
+    # Wait for drone to reach target altitude
+    logger.info(f"Waiting for drone to reach {takeoff_altitude}m...")
+    altitude_threshold = 0.5  # Consider arrived when within 0.5m of target
+    max_wait_time = 60  # Maximum wait time in seconds
+    check_interval = 1.0  # Check every second
+    elapsed_time = 0
+    
+    while elapsed_time < max_wait_time:
+        try:
+            async for position in drone.telemetry.position():
+                current_alt = position.relative_altitude_m
+                logger.info(f"  Altitude: {current_alt:.1f}m / {takeoff_altitude}m")
+                
+                if current_alt >= (takeoff_altitude - altitude_threshold):
+                    logger.info(f"{LogColors.SUCCESS}✅ Takeoff complete - reached {current_alt:.1f}m{LogColors.RESET}")
+                    result = {
+                        "status": "success",
+                        "message": f"Takeoff complete - drone at {current_alt:.1f}m AGL",
+                        "altitude_reached_m": round(current_alt, 1),
+                        "target_altitude_m": takeoff_altitude,
+                        "safe_to_navigate": True
+                    }
+                    log_tool_output(result)
+                    return result
+                break  # Got one position reading, wait and try again
+        except Exception as e:
+            logger.warning(f"Error reading altitude: {e}")
+        
+        await asyncio.sleep(check_interval)
+        elapsed_time += check_interval
+    
+    # Timeout - get final altitude
+    try:
+        async for position in drone.telemetry.position():
+            current_alt = position.relative_altitude_m
+            break
+    except:
+        current_alt = 0
+    
+    logger.warning(f"Takeoff timeout after {max_wait_time}s - current altitude: {current_alt:.1f}m")
+    return {
+        "status": "warning",
+        "message": f"Takeoff timeout - drone at {current_alt:.1f}m (target was {takeoff_altitude}m)",
+        "altitude_reached_m": round(current_alt, 1),
+        "target_altitude_m": takeoff_altitude,
+        "safe_to_navigate": current_alt >= (takeoff_altitude - altitude_threshold)
+    }
 
 @mcp.tool()
 async def land(ctx: Context) -> dict:
