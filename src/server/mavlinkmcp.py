@@ -1832,18 +1832,53 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
                 total_flight_time = asyncio.get_event_loop().time() - start_time
                 
                 if auto_land:
-                    # Automatically initiate landing
-                    logger.info(f"{LogColors.MAVLINK}🛬 Auto-landing initiated{LogColors.RESET}")
+                    # Automatically initiate landing and WAIT for it to complete
+                    logger.info(f"{LogColors.MAVLINK}🛬 Auto-landing initiated - waiting for touchdown{LogColors.RESET}")
                     get_flight_logger().log_entry("AUTO_LAND", "Landing initiated automatically")
-                    connector.landing_in_progress = True  # Track that we're landing
+                    connector.landing_in_progress = True
                     await drone.action.land()
                     
+                    # Wait for landing to complete (up to 120 seconds)
+                    landing_timeout = 120
+                    landing_start = asyncio.get_event_loop().time()
+                    
+                    while (asyncio.get_event_loop().time() - landing_start) < landing_timeout:
+                        # Check landed state
+                        async for state in drone.telemetry.landed_state():
+                            landed_state = state
+                            break
+                        
+                        async for position in drone.telemetry.position():
+                            current_alt = position.relative_altitude_m
+                            break
+                        
+                        landed_state_str = str(landed_state).split(".")[-1]
+                        
+                        if landed_state_str == "ON_GROUND" or current_alt < 0.5:
+                            # Successfully landed!
+                            connector.landing_in_progress = False
+                            total_flight_time = asyncio.get_event_loop().time() - start_time
+                            
+                            logger.info(f"{LogColors.SUCCESS}✅ LANDED! Flight complete.{LogColors.RESET}")
+                            get_flight_logger().log_entry("LANDED", "Mission complete")
+                            
+                            result = {
+                                "DISPLAY_TO_USER": f"✅ MISSION COMPLETE | Landed safely | Flight time: {total_flight_time:.0f}s",
+                                "status": "landed",
+                                "flight_time_seconds": round(total_flight_time, 0),
+                                "mission_complete": True
+                            }
+                            log_tool_output(result)
+                            return result
+                        
+                        logger.info(f"🛬 Landing... altitude: {current_alt:.1f}m")
+                        await asyncio.sleep(2)  # Check every 2 seconds
+                    
+                    # Timeout - return landing status
                     result = {
-                        "DISPLAY_TO_USER": f"✅ ARRIVED & LANDING | Distance: {distance:.1f}m | Alt: {current_alt:.1f}m | Flight time: {total_flight_time:.0f}s",
-                        "status": "landing",
-                        "distance_m": round(distance, 1),
+                        "DISPLAY_TO_USER": f"⚠️ LANDING TIMEOUT | Alt: {current_alt:.1f}m | Check drone status",
+                        "status": "landing_timeout",
                         "altitude_m": round(current_alt, 1),
-                        "action_required": "call monitor_flight again",
                         "mission_complete": False
                     }
                     log_tool_output(result)
