@@ -54,14 +54,15 @@ Traditional drone APIs simply forward commands to the flight controller. This MC
 ```
 Arm the drone, takeoff to 50 meters, and fly to [DESTINATION].
 
-ALWAYS show me the DISPLAY_TO_USER from each monitor_flight response.
-Keep calling monitor_flight until mission_complete is true.
+After go_to_location, you MUST call monitor_flight() repeatedly in a loop.
+Show me DISPLAY_TO_USER after each call.
+DO NOT STOP until mission_complete is true - the drone needs monitoring!
 ```
 
-**That's it!** The system now auto-lands:
-- `monitor_flight` automatically initiates landing when the drone arrives
-- Just keep calling `monitor_flight()` until `mission_complete: true`
-- "show me DISPLAY_TO_USER" forces ChatGPT to display real-time updates
+**Why "repeatedly in a loop" is critical:**
+- ChatGPT batches tool calls and stops after showing one result
+- Without explicit "loop" instruction, it abandons the drone mid-flight
+- Landing is automatic, but only if you keep calling `monitor_flight()`
 
 Set `auto_land=False` if you want to hover at destination instead of landing.
 

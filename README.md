@@ -79,14 +79,15 @@ Do not batch the calls - show me each update as you get it.
 ```
 Arm the drone, takeoff to 50 meters, and fly to the UCI athletic fields.
 
-ALWAYS show me the DISPLAY_TO_USER from each monitor_flight response.
-Keep calling monitor_flight until mission_complete is true.
+After go_to_location, you MUST call monitor_flight() repeatedly in a loop.
+Show me DISPLAY_TO_USER after each call.
+DO NOT STOP until mission_complete is true - the drone needs monitoring!
 ```
 
-**That's it!** Landing is now automatic:
-- When the drone arrives, `monitor_flight` automatically calls `land()` 
-- Just keep calling `monitor_flight()` until `mission_complete: true`
-- ChatGPT needs "show me DISPLAY_TO_USER" to display real-time updates
+**Important:** The prompt must explicitly say "loop" or "repeatedly" because:
+- ChatGPT tends to batch all tool calls and stop after one response
+- Without explicit loop instruction, it will abandon the drone mid-flight
+- Landing is automatic, but only if you keep calling `monitor_flight()`
 
 ### What the User Will See
 
