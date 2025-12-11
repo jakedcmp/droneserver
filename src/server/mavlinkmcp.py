@@ -1657,31 +1657,29 @@ async def check_arrival(
 
 
 @mcp.tool()
-async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_threshold_m: float = 10.0) -> dict:
+async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_threshold_m: float = 10.0, auto_land: bool = True) -> dict:
     """
     Monitor flight progress. PRINT the DISPLAY_TO_USER value to user after EACH call.
     
-    REQUIRED LOOP - DO NOT STOP UNTIL mission_complete IS TRUE:
+    SIMPLE LOOP - just keep calling until mission_complete is true:
     1. Call monitor_flight()
     2. PRINT the DISPLAY_TO_USER value to the user
-    3. If status is "arrived": CALL land() IMMEDIATELY
-    4. If mission_complete is false: GO BACK TO STEP 1
-    5. If mission_complete is true: STOP - drone has landed
+    3. If mission_complete is false: GO BACK TO STEP 1
+    4. If mission_complete is true: STOP - drone has landed safely
     
-    CRITICAL: When status is "arrived", you MUST call land() before calling 
-    monitor_flight() again. Do NOT stop at "arrived" - the drone is still in the air!
-    
-    The drone is only safe when mission_complete is true (status = "landed").
+    With auto_land=True (default), landing is triggered automatically when arrived.
+    You just need to keep calling monitor_flight() until mission_complete is true.
 
     Args:
         ctx (Context): The context of the request.
         wait_seconds (float): Seconds to wait before returning (default: 5).
         arrival_threshold_m (float): Distance to consider "arrived" (default: 10m).
+        auto_land (bool): Automatically land when arrived (default: True).
 
     Returns:
-        dict: DISPLAY_TO_USER (print this!), status, must_call_next, mission_complete.
+        dict: DISPLAY_TO_USER (print this!), status, mission_complete.
     """
-    log_tool_call("monitor_flight", wait_seconds=wait_seconds, arrival_threshold_m=arrival_threshold_m)
+    log_tool_call("monitor_flight", wait_seconds=wait_seconds, arrival_threshold_m=arrival_threshold_m, auto_land=auto_land)
     connector = ctx.request_context.lifespan_context
     
     # Wait for connection
@@ -1808,18 +1806,37 @@ async def monitor_flight(ctx: Context, wait_seconds: float = 5.0, arrival_thresh
                 
                 total_flight_time = asyncio.get_event_loop().time() - start_time
                 
-                result = {
-                    "DISPLAY_TO_USER": f"✅ ARRIVED! | Distance: {distance:.1f}m | Alt: {current_alt:.1f}m | Flight time: {total_flight_time:.0f}s | NOW LANDING...",
-                    "status": "arrived",
-                    "distance_m": round(distance, 1),
-                    "altitude_m": round(current_alt, 1),
-                    "flight_time_seconds": round(total_flight_time, 0),
-                    "action_required": "PRINT DISPLAY_TO_USER, then IMMEDIATELY call land(), then call monitor_flight() until mission_complete",
-                    "must_call_next": "land()",
-                    "mission_complete": False
-                }
-                log_tool_output(result)
-                return result
+                if auto_land:
+                    # Automatically initiate landing
+                    logger.info(f"{LogColors.CMD}🛬 Auto-landing initiated{LogColors.RESET}")
+                    get_flight_logger().log_entry("AUTO_LAND", "Landing initiated automatically")
+                    await drone.action.land()
+                    
+                    result = {
+                        "DISPLAY_TO_USER": f"✅ ARRIVED & LANDING | Distance: {distance:.1f}m | Alt: {current_alt:.1f}m | Flight time: {total_flight_time:.0f}s",
+                        "status": "landing",
+                        "distance_m": round(distance, 1),
+                        "altitude_m": round(current_alt, 1),
+                        "flight_time_seconds": round(total_flight_time, 0),
+                        "action_required": "PRINT DISPLAY_TO_USER, then CALL monitor_flight() until mission_complete",
+                        "mission_complete": False
+                    }
+                    log_tool_output(result)
+                    return result
+                else:
+                    # Manual landing required
+                    result = {
+                        "DISPLAY_TO_USER": f"✅ ARRIVED! | Distance: {distance:.1f}m | Alt: {current_alt:.1f}m | Flight time: {total_flight_time:.0f}s | Ready to land",
+                        "status": "arrived",
+                        "distance_m": round(distance, 1),
+                        "altitude_m": round(current_alt, 1),
+                        "flight_time_seconds": round(total_flight_time, 0),
+                        "action_required": "PRINT DISPLAY_TO_USER, call land() to land, then monitor_flight() until mission_complete",
+                        "must_call_next": "land()",
+                        "mission_complete": False
+                    }
+                    log_tool_output(result)
+                    return result
             
             # Wait before next check
             await asyncio.sleep(check_interval)

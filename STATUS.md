@@ -51,20 +51,19 @@ Traditional drone APIs simply forward commands to the flight controller. This MC
 
 ### Recommended Prompt
 
-**Important:** ChatGPT batches tool calls and may stop before landing. Use this prompt:
-
 ```
 Arm the drone, takeoff to 50 meters, and fly to [DESTINATION].
 
 ALWAYS show me the DISPLAY_TO_USER from each monitor_flight response.
-When arrived, call land() and keep monitoring until mission_complete is true.
-Do NOT stop until the drone has landed (mission_complete: true).
+Keep calling monitor_flight until mission_complete is true.
 ```
 
-**Why this format?**
-- "ALWAYS show me DISPLAY_TO_USER" → Forces visible output instead of hidden tool results
-- "until mission_complete is true" → Ensures LLM doesn't stop at "arrived" (still in air!)
-- "Do NOT stop until landed" → Explicit instruction to complete the full landing sequence
+**That's it!** The system now auto-lands:
+- `monitor_flight` automatically initiates landing when the drone arrives
+- Just keep calling `monitor_flight()` until `mission_complete: true`
+- "show me DISPLAY_TO_USER" forces ChatGPT to display real-time updates
+
+Set `auto_land=False` if you want to hover at destination instead of landing.
 
 ### Example Flight Monitoring Output (DISPLAY_TO_USER)
 

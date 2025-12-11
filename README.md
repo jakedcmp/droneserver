@@ -75,19 +75,18 @@ You MUST print the DISPLAY_TO_USER text to me after EACH monitor_flight call.
 Do not batch the calls - show me each update as you get it.
 ```
 
-**Example with a real destination:**
+**Example prompt:**
 ```
-Arm the drone, takeoff to 50 meters, and fly to the UCI athletic fields
-at coordinates (33.6420, -117.8269).
+Arm the drone, takeoff to 50 meters, and fly to the UCI athletic fields.
 
 ALWAYS show me the DISPLAY_TO_USER from each monitor_flight response.
-When arrived, call land() and keep monitoring until mission_complete is true.
-Do NOT stop until the drone has landed (mission_complete: true).
+Keep calling monitor_flight until mission_complete is true.
 ```
 
-**Why this prompt format?** 
-- ChatGPT batches tool calls by default - "show me DISPLAY_TO_USER" forces visible output
-- LLMs may stop at "arrived" - explicit "until mission_complete" ensures landing completes
+**That's it!** Landing is now automatic:
+- When the drone arrives, `monitor_flight` automatically calls `land()` 
+- Just keep calling `monitor_flight()` until `mission_complete: true`
+- ChatGPT needs "show me DISPLAY_TO_USER" to display real-time updates
 
 ### What the User Will See
 
