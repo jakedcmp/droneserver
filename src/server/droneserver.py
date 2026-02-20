@@ -262,9 +262,11 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
         logger.info("  MAVLINK_PROTOCOL: %s", protocol)
         logger.info("=" * 60)
         
-        if not address:
-            logger.warning("WARNING: MAVLINK_ADDRESS not set in .env file!")
-            raise ValueError("MAVLINK_ADDRESS not configured in .env file")
+        # Empty or 0.0.0.0 address = MAVSDK listen mode (udp://:PORT)
+        # This is needed when PX4 SITL sends heartbeats TO droneserver
+        if not address or address == "0.0.0.0":
+            address = ""
+            logger.info("  Listen mode: will accept connections on port %s", port)
         
         # Validate protocol
         if protocol not in ["tcp", "udp", "serial"]:
