@@ -4036,6 +4036,10 @@ async def execute_grid_search(
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        # RTL after mission completes
+        log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
+        await drone.mission.set_return_to_launch_after_mission(True)
+
         # Small delay to let PX4 process the upload before starting
         await asyncio.sleep(0.5)
 
@@ -4151,6 +4155,9 @@ async def execute_expanding_square(
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
+        await drone.mission.set_return_to_launch_after_mission(True)
+
         await asyncio.sleep(0.5)
 
         log_mavlink_cmd("drone.mission.start_mission")
@@ -4260,6 +4267,9 @@ async def execute_sector_search(
 
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
+
+        log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
+        await drone.mission.set_return_to_launch_after_mission(True)
 
         await asyncio.sleep(0.5)
 
