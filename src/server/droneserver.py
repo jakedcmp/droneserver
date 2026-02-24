@@ -4379,26 +4379,81 @@ async def monitor_search_progress(ctx: Context) -> dict:
         except (asyncio.TimeoutError, Exception):
             pass
 
-        # Update sector statuses based on current waypoint index
+        # Update sector statuses using position-based proximity
+        # (PX4 mission_progress may return 0/0 when using mission_raw upload)
         current_sector_id = None
-        for sector in mission.sectors:
-            start_idx, end_idx = sector.waypoint_index_range
-            if current_wp > end_idx and sector.status != SectorStatus.COMPLETED:
-                # Drone has passed all waypoints in this sector
-                sector.status = SectorStatus.COMPLETED
-                if sector.completed_at is None:
-                    sector.completed_at = time.time()
-            elif start_idx <= current_wp <= end_idx:
-                # Drone is currently in this sector
-                if sector.status != SectorStatus.ACTIVE:
-                    sector.status = SectorStatus.ACTIVE
-                    if sector.started_at is None:
-                        sector.started_at = time.time()
-                current_sector_id = sector.id
+        drone_lat = position_data.get("latitude_deg")
+        drone_lon = position_data.get("longitude_deg")
+
+        if drone_lat is not None and drone_lon is not None:
+            WAYPOINT_REACHED_M = 15.0  # consider waypoint reached within this radius
+
+            for sector in mission.sectors:
+                if sector.status == SectorStatus.COMPLETED:
+                    continue
+
+                # Check if drone is near any waypoint in this sector
+                near_sector = False
+                last_wp = sector.waypoints[-1] if sector.waypoints else None
+                for wp in sector.waypoints:
+                    dist = haversine_distance(
+                        drone_lat, drone_lon,
+                        wp["latitude_deg"], wp["longitude_deg"]
+                    )
+                    if dist < WAYPOINT_REACHED_M:
+                        near_sector = True
+                        break
+
+                # Check if drone reached the last waypoint of this sector
+                last_wp_reached = False
+                if last_wp:
+                    last_dist = haversine_distance(
+                        drone_lat, drone_lon,
+                        last_wp["latitude_deg"], last_wp["longitude_deg"]
+                    )
+                    last_wp_reached = last_dist < WAYPOINT_REACHED_M
+
+                if near_sector:
+                    if sector.status != SectorStatus.ACTIVE:
+                        sector.status = SectorStatus.ACTIVE
+                        if sector.started_at is None:
+                            sector.started_at = time.time()
+                    current_sector_id = sector.id
+                    break  # Only one sector can be active at a time
+
+            # Mark sectors as completed if the drone has moved past them
+            # A sector is complete if it was active and the drone is now in a later sector
+            # or near a later sector's waypoints
+            if current_sector_id:
+                found_current = False
+                for sector in mission.sectors:
+                    if sector.id == current_sector_id:
+                        found_current = True
+                        continue
+                    if not found_current and sector.status == SectorStatus.ACTIVE:
+                        # This sector was active but drone has moved to a later one
+                        sector.status = SectorStatus.COMPLETED
+                        if sector.completed_at is None:
+                            sector.completed_at = time.time()
+
+        # Also use PX4 waypoint index if available (non-zero)
+        if current_wp > 0 and total_wp > 0:
+            for sector in mission.sectors:
+                start_idx, end_idx = sector.waypoint_index_range
+                if current_wp > end_idx and sector.status not in (SectorStatus.COMPLETED, SectorStatus.SKIPPED):
+                    sector.status = SectorStatus.COMPLETED
+                    if sector.completed_at is None:
+                        sector.completed_at = time.time()
+                elif start_idx <= current_wp <= end_idx and sector.status != SectorStatus.COMPLETED:
+                    if sector.status != SectorStatus.ACTIVE:
+                        sector.status = SectorStatus.ACTIVE
+                        if sector.started_at is None:
+                            sector.started_at = time.time()
+                    current_sector_id = sector.id
 
         # Check if mission is complete
         all_done = all(s.status == SectorStatus.COMPLETED for s in mission.sectors) if mission.sectors else False
-        if all_done and current_wp >= total_wp - 1:
+        if all_done:
             mission.status = MissionStatus.COMPLETED
 
         state = mission.to_dict()
