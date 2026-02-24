@@ -6,10 +6,14 @@ from mcp.server.fastmcp import Context, FastMCP
 from typing import Tuple
 from mavsdk import System
 from mavsdk.mission_raw import MissionItem
+from enum import Enum
 import asyncio
 import os
 import logging
 import math
+import uuid
+import time
+import json
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -172,6 +176,363 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     
     return R * c
 
+class MissionStatus(Enum):
+    CREATED = "created"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+
+class SectorStatus(Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+
+@dataclass
+class Sector:
+    id: str
+    bounds: dict
+    status: SectorStatus = SectorStatus.PENDING
+    waypoints: list = field(default_factory=list)
+    waypoint_index_range: tuple = field(default=(0, 0))  # (start, end) indices into mission waypoint list
+    started_at: float | None = None
+    completed_at: float | None = None
+
+@dataclass
+class Finding:
+    id: str
+    type: str
+    lat: float
+    lon: float
+    confidence: float
+    metadata: dict = field(default_factory=dict)
+    image_ref: str | None = None
+    timestamp: float = field(default_factory=time.time)
+
+@dataclass
+class Decision:
+    trigger: str
+    action: str
+    rationale: str
+    timestamp: float = field(default_factory=time.time)
+
+@dataclass
+class MissionState:
+    id: str
+    type: str
+    status: MissionStatus
+    objective: str
+    area: dict
+    params: dict = field(default_factory=dict)
+    sectors: list[Sector] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
+    decisions: list[Decision] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        """Full JSON-serializable state for get_mission_state()"""
+        sectors_completed = sum(1 for s in self.sectors if s.status == SectorStatus.COMPLETED)
+        sectors_total = len(self.sectors)
+        coverage_pct = round((sectors_completed / sectors_total * 100), 1) if sectors_total > 0 else 0.0
+        return {
+            "mission": {
+                "id": self.id,
+                "type": self.type,
+                "status": self.status.value,
+                "objective": self.objective,
+                "area": self.area,
+                "params": self.params,
+            },
+            "progress": {
+                "sectors_total": sectors_total,
+                "sectors_completed": sectors_completed,
+                "sectors_remaining": sectors_total - sectors_completed,
+                "coverage_pct": coverage_pct,
+                "elapsed_s": round(time.time() - self.created_at, 1),
+            },
+            "sectors": [
+                {
+                    "id": s.id,
+                    "status": s.status.value,
+                    "bounds": s.bounds,
+                    "waypoint_index_range": list(s.waypoint_index_range),
+                }
+                for s in self.sectors
+            ],
+            "findings": [
+                {
+                    "id": f.id,
+                    "type": f.type,
+                    "lat": f.lat,
+                    "lon": f.lon,
+                    "confidence": f.confidence,
+                    "metadata": f.metadata,
+                    "image_ref": f.image_ref,
+                    "timestamp": f.timestamp,
+                }
+                for f in self.findings
+            ],
+            "decisions": [
+                {
+                    "trigger": d.trigger,
+                    "action": d.action,
+                    "rationale": d.rationale,
+                    "timestamp": d.timestamp,
+                }
+                for d in self.decisions
+            ],
+        }
+
+    def summary(self) -> str:
+        """Natural language summary for get_mission_summary()"""
+        sectors_completed = sum(1 for s in self.sectors if s.status == SectorStatus.COMPLETED)
+        sectors_total = len(self.sectors)
+        active_sectors = [s for s in self.sectors if s.status == SectorStatus.ACTIVE]
+        elapsed = round(time.time() - self.created_at)
+
+        lines = [
+            f"Mission {self.id} ({self.type}): {self.status.value}",
+            f"Objective: {self.objective}",
+            f"Progress: {sectors_completed}/{sectors_total} sectors completed "
+            f"({round(sectors_completed / sectors_total * 100, 1) if sectors_total else 0}%)",
+        ]
+        if active_sectors:
+            lines.append(f"Currently searching: sector {active_sectors[0].id}")
+        if self.findings:
+            lines.append(f"Findings: {len(self.findings)} points of interest logged")
+            for f in self.findings[-3:]:  # Last 3 findings
+                lines.append(f"  - {f.type} at ({f.lat:.5f}, {f.lon:.5f}) confidence={f.confidence}")
+        if self.decisions:
+            last = self.decisions[-1]
+            lines.append(f"Last decision: {last.action} (trigger: {last.trigger})")
+        lines.append(f"Elapsed: {elapsed}s")
+        return "\n".join(lines)
+
+
+# Image store for vision pipeline (module-level, persists across requests)
+_image_store: dict[str, dict] = {}
+
+
+# ============================================================
+# Geometry Helpers (pure functions for search pattern generation)
+# ============================================================
+
+def offset_gps(lat: float, lon: float, north_m: float, east_m: float) -> tuple[float, float]:
+    """Offset a GPS coordinate by meters north and east.
+    Uses flat-earth approximation (111320 m/deg). Accurate for <10km offsets.
+    """
+    new_lat = lat + north_m / 111320.0
+    new_lon = lon + east_m / (111320.0 * math.cos(math.radians(lat)))
+    return (new_lat, new_lon)
+
+
+def generate_grid_waypoints(
+    bounds: dict, altitude: float, spacing: float
+) -> tuple[list[dict], list[Sector]]:
+    """Generate lawnmower (boustrophedon) grid search waypoints.
+
+    Args:
+        bounds: dict with keys north, south, east, west (lat/lon degrees)
+        altitude: flight altitude in meters (relative)
+        spacing: distance between passes in meters
+
+    Returns:
+        (waypoints, sectors) — waypoints are dicts with lat/lon/alt,
+        sectors correspond to individual passes with waypoint index ranges.
+    """
+    north, south = bounds["north"], bounds["south"]
+    east, west = bounds["east"], bounds["west"]
+
+    # Area dimensions in meters
+    height_m = haversine_distance(south, west, north, west)
+    width_m = haversine_distance(south, west, south, east)
+
+    num_passes = max(1, math.ceil(width_m / spacing))
+    actual_spacing = width_m / num_passes
+
+    waypoints = []
+    sectors = []
+    wp_index = 0
+
+    for i in range(num_passes + 1):
+        sector_start = wp_index
+        east_offset = actual_spacing * i
+
+        if i % 2 == 0:
+            # South to North
+            start = offset_gps(south, west, 0, east_offset)
+            end = offset_gps(south, west, height_m, east_offset)
+        else:
+            # North to South
+            start = offset_gps(south, west, height_m, east_offset)
+            end = offset_gps(south, west, 0, east_offset)
+
+        wp_start = {"latitude_deg": start[0], "longitude_deg": start[1], "relative_altitude_m": altitude}
+        wp_end = {"latitude_deg": end[0], "longitude_deg": end[1], "relative_altitude_m": altitude}
+        waypoints.extend([wp_start, wp_end])
+        wp_index += 2
+
+        sector_bounds = {
+            "south": min(start[0], end[0]),
+            "north": max(start[0], end[0]),
+            "west": min(start[1], end[1]),
+            "east": max(start[1], end[1]),
+        }
+        sectors.append(Sector(
+            id=f"pass-{i}",
+            bounds=sector_bounds,
+            waypoints=[wp_start, wp_end],
+            waypoint_index_range=(sector_start, wp_index - 1),
+        ))
+
+    return waypoints, sectors
+
+
+def generate_expanding_square_waypoints(
+    center_lat: float, center_lon: float, altitude: float,
+    initial_size: float, expansion: float, legs: int
+) -> tuple[list[dict], list[Sector]]:
+    """Generate SAR expanding square search pattern.
+
+    Spiral outward from center in square legs of increasing length.
+    Pattern: E, N, W, W, S, S, E, E, E, N, N, N, ... (each direction twice before increasing)
+
+    Args:
+        center_lat, center_lon: center of search in degrees
+        altitude: flight altitude in meters (relative)
+        initial_size: length of first leg in meters
+        expansion: how much each pair of legs grows in meters
+        legs: total number of legs to fly
+
+    Returns:
+        (waypoints, sectors) — each leg is one sector
+    """
+    # Directions: E, N, W, S (cycle)
+    directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]  # (north_mult, east_mult)
+
+    waypoints = []
+    sectors = []
+    current_lat, current_lon = center_lat, center_lon
+
+    # Start point
+    waypoints.append({
+        "latitude_deg": current_lat,
+        "longitude_deg": current_lon,
+        "relative_altitude_m": altitude,
+    })
+    wp_index = 1
+
+    leg_length = initial_size
+    for i in range(legs):
+        dir_idx = i % 4
+        north_mult, east_mult = directions[dir_idx]
+
+        north_m = north_mult * leg_length
+        east_m = east_mult * leg_length
+
+        new_lat, new_lon = offset_gps(current_lat, current_lon, north_m, east_m)
+
+        sector_start = wp_index
+        waypoints.append({
+            "latitude_deg": new_lat,
+            "longitude_deg": new_lon,
+            "relative_altitude_m": altitude,
+        })
+        wp_index += 1
+
+        sectors.append(Sector(
+            id=f"leg-{i}",
+            bounds={
+                "south": min(current_lat, new_lat),
+                "north": max(current_lat, new_lat),
+                "west": min(current_lon, new_lon),
+                "east": max(current_lon, new_lon),
+            },
+            waypoints=[waypoints[-1]],
+            waypoint_index_range=(sector_start, sector_start),
+        ))
+
+        current_lat, current_lon = new_lat, new_lon
+        # Increase leg length every 2 legs
+        if i % 2 == 1:
+            leg_length += expansion
+
+    return waypoints, sectors
+
+
+def generate_sector_search_waypoints(
+    center_lat: float, center_lon: float, radius: float,
+    altitude: float, num_sectors: int
+) -> tuple[list[dict], list[Sector]]:
+    """Generate pie-slice sector search pattern.
+
+    Fly center → perimeter → arc sweep → center for each sector.
+
+    Args:
+        center_lat, center_lon: center of search area in degrees
+        radius: search radius in meters
+        altitude: flight altitude in meters (relative)
+        num_sectors: number of pie slices
+
+    Returns:
+        (waypoints, sectors) — each pie slice is one sector
+    """
+    waypoints = []
+    sectors = []
+    wp_index = 0
+    angle_step = 360.0 / num_sectors
+
+    for i in range(num_sectors):
+        sector_start = wp_index
+        sector_wps = []
+
+        # Center point
+        center_wp = {
+            "latitude_deg": center_lat,
+            "longitude_deg": center_lon,
+            "relative_altitude_m": altitude,
+        }
+        sector_wps.append(center_wp)
+
+        # Points along the arc for this sector (start angle to end angle)
+        start_angle = i * angle_step
+        end_angle = (i + 1) * angle_step
+        arc_points = 3  # start, mid, end of arc
+
+        for j in range(arc_points):
+            angle_deg = start_angle + (end_angle - start_angle) * j / (arc_points - 1)
+            angle_rad = math.radians(angle_deg)
+            north_m = radius * math.cos(angle_rad)
+            east_m = radius * math.sin(angle_rad)
+            pt_lat, pt_lon = offset_gps(center_lat, center_lon, north_m, east_m)
+            sector_wps.append({
+                "latitude_deg": pt_lat,
+                "longitude_deg": pt_lon,
+                "relative_altitude_m": altitude,
+            })
+
+        waypoints.extend(sector_wps)
+        wp_index += len(sector_wps)
+
+        # Sector bounds (approximate from waypoints)
+        lats = [w["latitude_deg"] for w in sector_wps]
+        lons = [w["longitude_deg"] for w in sector_wps]
+        sectors.append(Sector(
+            id=f"sector-{i}",
+            bounds={
+                "south": min(lats),
+                "north": max(lats),
+                "west": min(lons),
+                "east": max(lons),
+            },
+            waypoints=sector_wps,
+            waypoint_index_range=(sector_start, wp_index - 1),
+        ))
+
+    return waypoints, sectors
+
+
 @dataclass
 class MAVLinkConnector:
     drone: System
@@ -180,6 +541,8 @@ class MAVLinkConnector:
     pending_destination: dict | None = field(default=None)
     # Track if landing has been initiated (to properly monitor landing progress)
     landing_in_progress: bool = field(default=False)
+    # Mission state for Phase 2 mission intelligence
+    current_mission: MissionState | None = field(default=None)
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -3346,6 +3709,817 @@ async def get_odometry(ctx: Context) -> dict:
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get odometry: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Odometry read failed: {str(e)}"}
+
+
+# ============================================================
+# Phase 2A: Mission State Tools
+# ============================================================
+
+@mcp.tool()
+async def create_mission(ctx: Context, type: str, objective: str, area: dict, params: dict = {}) -> dict:
+    """Create a new mission, replacing any existing mission.
+
+    This initializes the mission state system that tracks progress, findings, and decisions
+    throughout an autonomous search or survey operation.
+
+    Args:
+        ctx: MCP context
+        type: Mission type (e.g. "grid_search", "expanding_square", "sector_search", "custom")
+        objective: Human-readable mission objective (e.g. "Survey solar farm for panel damage")
+        area: Area definition dict. For search patterns, use {north, south, east, west} bounds
+              or {center_lat, center_lon, radius} for circular areas.
+        params: Optional mission parameters (e.g. altitude, spacing, speed)
+
+    Returns:
+        dict with mission ID and initial state
+    """
+    log_tool_call("create_mission", type=type, objective=objective, area=area, params=params)
+    connector = ctx.request_context.lifespan_context
+
+    mission_id = f"mission-{uuid.uuid4().hex[:8]}"
+    mission = MissionState(
+        id=mission_id,
+        type=type,
+        status=MissionStatus.CREATED,
+        objective=objective,
+        area=area,
+        params=params,
+    )
+    connector.current_mission = mission
+
+    result = {
+        "status": "success",
+        "message": f"Mission {mission_id} created",
+        "mission_id": mission_id,
+        "type": type,
+        "objective": objective,
+    }
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def get_mission_state(ctx: Context) -> dict:
+    """Get the full mission state as JSON.
+
+    This is the primary context tool — returns everything the LLM needs to understand
+    current mission progress: sectors completed, findings logged, decisions made.
+
+    Args:
+        ctx: MCP context
+
+    Returns:
+        dict with full mission state or error if no active mission
+    """
+    log_tool_call("get_mission_state")
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission. Use create_mission first."}
+        log_tool_output(result)
+        return result
+
+    state = connector.current_mission.to_dict()
+    result = {"status": "success", **state}
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def get_mission_summary(ctx: Context) -> dict:
+    """Get a concise natural language summary of mission progress.
+
+    Lighter than get_mission_state — returns a human-readable summary string
+    suitable for quick status checks without flooding context.
+
+    Args:
+        ctx: MCP context
+
+    Returns:
+        dict with summary string
+    """
+    log_tool_call("get_mission_summary")
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission. Use create_mission first."}
+        log_tool_output(result)
+        return result
+
+    summary = connector.current_mission.summary()
+    result = {"status": "success", "summary": summary}
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def update_mission_progress(ctx: Context, sector_id: str, status: str) -> dict:
+    """Update the status of a mission sector.
+
+    Called as search patterns execute to mark sectors active, completed, or skipped.
+    Also used by monitor_search_progress for automatic tracking.
+
+    Args:
+        ctx: MCP context
+        sector_id: The sector ID (e.g. "pass-0", "leg-2", "sector-1")
+        status: New status — one of "pending", "active", "completed", "skipped"
+
+    Returns:
+        dict with updated sector info
+    """
+    log_tool_call("update_mission_progress", sector_id=sector_id, status=status)
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission."}
+        log_tool_output(result)
+        return result
+
+    try:
+        new_status = SectorStatus(status)
+    except ValueError:
+        result = {"status": "failed", "error": f"Invalid status '{status}'. Use: pending, active, completed, skipped"}
+        log_tool_output(result)
+        return result
+
+    for sector in connector.current_mission.sectors:
+        if sector.id == sector_id:
+            sector.status = new_status
+            if new_status == SectorStatus.ACTIVE and sector.started_at is None:
+                sector.started_at = time.time()
+            elif new_status in (SectorStatus.COMPLETED, SectorStatus.SKIPPED):
+                sector.completed_at = time.time()
+            result = {"status": "success", "sector_id": sector_id, "new_status": status}
+            log_tool_output(result)
+            return result
+
+    result = {"status": "failed", "error": f"Sector '{sector_id}' not found in mission"}
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def add_finding(
+    ctx: Context, type: str, lat: float, lon: float,
+    confidence: float, metadata: dict = {}, image_ref: str | None = None
+) -> dict:
+    """Log a point of interest found during a mission.
+
+    Findings are stored in the mission state and included in get_mission_state responses.
+    Use this whenever the drone detects something worth recording.
+
+    Args:
+        ctx: MCP context
+        type: Finding type (e.g. "damaged_panel", "hotspot", "person", "anomaly")
+        lat: Latitude in degrees
+        lon: Longitude in degrees
+        confidence: Confidence score 0.0-1.0
+        metadata: Optional additional data (e.g. description, severity)
+        image_ref: Optional reference to a captured image
+
+    Returns:
+        dict with finding ID
+    """
+    log_tool_call("add_finding", type=type, lat=lat, lon=lon, confidence=confidence, metadata=metadata, image_ref=image_ref)
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission."}
+        log_tool_output(result)
+        return result
+
+    finding_id = f"f-{len(connector.current_mission.findings) + 1}"
+    finding = Finding(
+        id=finding_id,
+        type=type,
+        lat=lat,
+        lon=lon,
+        confidence=confidence,
+        metadata=metadata,
+        image_ref=image_ref,
+    )
+    connector.current_mission.findings.append(finding)
+
+    result = {
+        "status": "success",
+        "finding_id": finding_id,
+        "type": type,
+        "position": {"lat": lat, "lon": lon},
+        "confidence": confidence,
+        "total_findings": len(connector.current_mission.findings),
+    }
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def log_decision(ctx: Context, trigger: str, action: str, rationale: str) -> dict:
+    """Record an adaptive re-tasking decision.
+
+    Decisions are logged with trigger/action/rationale format for experience storage.
+    Use this when the drone changes behavior based on findings or conditions.
+
+    Args:
+        ctx: MCP context
+        trigger: What triggered the decision (e.g. "finding f-1", "low battery", "high-confidence detection")
+        action: What action was taken (e.g. "orbit_for_closer_look", "skip_sector", "return_to_base")
+        rationale: Why this action was chosen
+
+    Returns:
+        dict confirming decision logged
+    """
+    log_tool_call("log_decision", trigger=trigger, action=action, rationale=rationale)
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission."}
+        log_tool_output(result)
+        return result
+
+    decision = Decision(trigger=trigger, action=action, rationale=rationale)
+    connector.current_mission.decisions.append(decision)
+
+    result = {
+        "status": "success",
+        "message": f"Decision logged: {action}",
+        "total_decisions": len(connector.current_mission.decisions),
+    }
+    log_tool_output(result)
+    return result
+
+
+# ============================================================
+# Phase 2B: Search Pattern Tools
+# ============================================================
+
+@mcp.tool()
+async def execute_grid_search(
+    ctx: Context, bounds: dict, altitude: float, spacing: float, objective: str = "Grid search"
+) -> dict:
+    """Execute a grid (lawnmower) search pattern over a rectangular area.
+
+    Generates boustrophedon waypoints, creates a mission, uploads to PX4, and starts.
+    The drone must be armed and airborne.
+
+    Args:
+        ctx: MCP context
+        bounds: Area bounds as {north, south, east, west} in latitude/longitude degrees.
+                Example: {"north": 47.3984, "south": 47.3972, "east": 8.5467, "west": 8.5453}
+        altitude: Flight altitude in meters (relative to home)
+        spacing: Distance between passes in meters (e.g. 30 for wide coverage, 10 for detailed)
+        objective: Mission objective description
+
+    Returns:
+        dict with mission state, waypoint count, estimated flight info
+    """
+    log_tool_call("execute_grid_search", bounds=bounds, altitude=altitude, spacing=spacing, objective=objective)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    # Validate bounds
+    required_keys = ["north", "south", "east", "west"]
+    missing = [k for k in required_keys if k not in bounds]
+    if missing:
+        return {"status": "failed", "error": f"Bounds missing keys: {missing}. Need: {required_keys}"}
+    if bounds["north"] <= bounds["south"]:
+        return {"status": "failed", "error": "north must be > south"}
+    if bounds["east"] <= bounds["west"]:
+        return {"status": "failed", "error": "east must be > west"}
+
+    # Generate waypoints
+    waypoints, sectors = generate_grid_waypoints(bounds, altitude, spacing)
+
+    if len(waypoints) > 200:
+        return {
+            "status": "failed",
+            "error": f"Too many waypoints ({len(waypoints)}). Reduce area or increase spacing. Max 200.",
+        }
+    if len(waypoints) < 2:
+        return {"status": "failed", "error": "Area too small for grid search."}
+
+    # Create mission state
+    mission_id = f"mission-{uuid.uuid4().hex[:8]}"
+    mission = MissionState(
+        id=mission_id,
+        type="grid_search",
+        status=MissionStatus.ACTIVE,
+        objective=objective,
+        area=bounds,
+        params={"altitude": altitude, "spacing": spacing},
+        sectors=sectors,
+    )
+    connector.current_mission = mission
+
+    # Build MissionItems and upload to PX4
+    drone = connector.drone
+    try:
+        mission_items = []
+        for i, wp in enumerate(waypoints):
+            mission_items.append(MissionItem(
+                seq=i,
+                frame=3,  # MAV_FRAME_GLOBAL_RELATIVE_ALT
+                command=16,  # MAV_CMD_NAV_WAYPOINT
+                current=1 if i == 0 else 0,
+                autocontinue=1,
+                param1=0,
+                param2=2.0,  # acceptance radius
+                param3=0,
+                param4=float('nan'),
+                x=int(wp["latitude_deg"] * 1e7),
+                y=int(wp["longitude_deg"] * 1e7),
+                z=float(wp["relative_altitude_m"]),
+                mission_type=0,
+            ))
+
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+        await drone.mission_raw.upload_mission(mission_items)
+
+        log_mavlink_cmd("drone.mission.start_mission")
+        await drone.mission.start_mission()
+
+        # Mark first sector as active
+        if sectors:
+            sectors[0].status = SectorStatus.ACTIVE
+            sectors[0].started_at = time.time()
+
+        result = {
+            "status": "success",
+            "message": f"Grid search started: {len(waypoints)} waypoints, {len(sectors)} passes",
+            "mission_id": mission_id,
+            "waypoint_count": len(waypoints),
+            "sector_count": len(sectors),
+            "pattern": "boustrophedon (lawnmower)",
+            "altitude_m": altitude,
+            "spacing_m": spacing,
+            "note": "Use monitor_search_progress() to track sector completion",
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        mission.status = MissionStatus.ABORTED
+        logger.error(f"{LogColors.ERROR}Grid search failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Grid search failed: {str(e)}"}
+
+
+@mcp.tool()
+async def execute_expanding_square(
+    ctx: Context, center_lat: float, center_lon: float,
+    altitude: float, initial_size: float = 50.0, expansion: float = 50.0,
+    legs: int = 12, objective: str = "Expanding square search"
+) -> dict:
+    """Execute a SAR expanding square search pattern.
+
+    Spirals outward from a center point in square legs of increasing length.
+    Standard SAR pattern for when the target's last known position is approximate.
+
+    Args:
+        ctx: MCP context
+        center_lat: Center latitude in degrees
+        center_lon: Center longitude in degrees
+        altitude: Flight altitude in meters (relative)
+        initial_size: Length of first leg in meters (default 50)
+        expansion: How much each pair of legs grows in meters (default 50)
+        legs: Total number of legs to fly (default 12)
+        objective: Mission objective description
+
+    Returns:
+        dict with mission state and pattern info
+    """
+    log_tool_call("execute_expanding_square", center_lat=center_lat, center_lon=center_lon,
+                  altitude=altitude, initial_size=initial_size, expansion=expansion, legs=legs, objective=objective)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    waypoints, sectors = generate_expanding_square_waypoints(
+        center_lat, center_lon, altitude, initial_size, expansion, legs
+    )
+
+    if len(waypoints) > 200:
+        return {"status": "failed", "error": f"Too many waypoints ({len(waypoints)}). Reduce legs. Max 200."}
+
+    mission_id = f"mission-{uuid.uuid4().hex[:8]}"
+    mission = MissionState(
+        id=mission_id,
+        type="expanding_square",
+        status=MissionStatus.ACTIVE,
+        objective=objective,
+        area={"center_lat": center_lat, "center_lon": center_lon},
+        params={"altitude": altitude, "initial_size": initial_size, "expansion": expansion, "legs": legs},
+        sectors=sectors,
+    )
+    connector.current_mission = mission
+
+    drone = connector.drone
+    try:
+        mission_items = []
+        for i, wp in enumerate(waypoints):
+            mission_items.append(MissionItem(
+                seq=i,
+                frame=3,
+                command=16,
+                current=1 if i == 0 else 0,
+                autocontinue=1,
+                param1=0,
+                param2=2.0,
+                param3=0,
+                param4=float('nan'),
+                x=int(wp["latitude_deg"] * 1e7),
+                y=int(wp["longitude_deg"] * 1e7),
+                z=float(wp["relative_altitude_m"]),
+                mission_type=0,
+            ))
+
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+        await drone.mission_raw.upload_mission(mission_items)
+
+        log_mavlink_cmd("drone.mission.start_mission")
+        await drone.mission.start_mission()
+
+        if sectors:
+            sectors[0].status = SectorStatus.ACTIVE
+            sectors[0].started_at = time.time()
+
+        result = {
+            "status": "success",
+            "message": f"Expanding square started: {len(waypoints)} waypoints, {len(sectors)} legs",
+            "mission_id": mission_id,
+            "waypoint_count": len(waypoints),
+            "sector_count": len(sectors),
+            "pattern": "expanding_square (SAR standard)",
+            "altitude_m": altitude,
+            "note": "Use monitor_search_progress() to track leg completion",
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        mission.status = MissionStatus.ABORTED
+        logger.error(f"{LogColors.ERROR}Expanding square failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Expanding square failed: {str(e)}"}
+
+
+@mcp.tool()
+async def execute_sector_search(
+    ctx: Context, center_lat: float, center_lon: float,
+    radius: float, altitude: float, num_sectors: int = 6,
+    objective: str = "Sector search"
+) -> dict:
+    """Execute a pie-slice sector search pattern.
+
+    Divides a circular area into sectors and flies center → arc → sweep → center for each.
+    Good for searching around a known point of interest.
+
+    Args:
+        ctx: MCP context
+        center_lat: Center latitude in degrees
+        center_lon: Center longitude in degrees
+        radius: Search radius in meters
+        altitude: Flight altitude in meters (relative)
+        num_sectors: Number of pie slices (default 6)
+        objective: Mission objective description
+
+    Returns:
+        dict with mission state and pattern info
+    """
+    log_tool_call("execute_sector_search", center_lat=center_lat, center_lon=center_lon,
+                  radius=radius, altitude=altitude, num_sectors=num_sectors, objective=objective)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    waypoints, sectors = generate_sector_search_waypoints(
+        center_lat, center_lon, radius, altitude, num_sectors
+    )
+
+    if len(waypoints) > 200:
+        return {"status": "failed", "error": f"Too many waypoints ({len(waypoints)}). Reduce num_sectors. Max 200."}
+
+    mission_id = f"mission-{uuid.uuid4().hex[:8]}"
+    mission = MissionState(
+        id=mission_id,
+        type="sector_search",
+        status=MissionStatus.ACTIVE,
+        objective=objective,
+        area={"center_lat": center_lat, "center_lon": center_lon, "radius": radius},
+        params={"altitude": altitude, "num_sectors": num_sectors},
+        sectors=sectors,
+    )
+    connector.current_mission = mission
+
+    drone = connector.drone
+    try:
+        mission_items = []
+        for i, wp in enumerate(waypoints):
+            mission_items.append(MissionItem(
+                seq=i,
+                frame=3,
+                command=16,
+                current=1 if i == 0 else 0,
+                autocontinue=1,
+                param1=0,
+                param2=2.0,
+                param3=0,
+                param4=float('nan'),
+                x=int(wp["latitude_deg"] * 1e7),
+                y=int(wp["longitude_deg"] * 1e7),
+                z=float(wp["relative_altitude_m"]),
+                mission_type=0,
+            ))
+
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+        await drone.mission_raw.upload_mission(mission_items)
+
+        log_mavlink_cmd("drone.mission.start_mission")
+        await drone.mission.start_mission()
+
+        if sectors:
+            sectors[0].status = SectorStatus.ACTIVE
+            sectors[0].started_at = time.time()
+
+        result = {
+            "status": "success",
+            "message": f"Sector search started: {len(waypoints)} waypoints, {len(sectors)} sectors",
+            "mission_id": mission_id,
+            "waypoint_count": len(waypoints),
+            "sector_count": len(sectors),
+            "pattern": "sector_search (pie-slice)",
+            "altitude_m": altitude,
+            "radius_m": radius,
+            "note": "Use monitor_search_progress() to track sector completion",
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        mission.status = MissionStatus.ABORTED
+        logger.error(f"{LogColors.ERROR}Sector search failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Sector search failed: {str(e)}"}
+
+
+@mcp.tool()
+async def monitor_search_progress(ctx: Context) -> dict:
+    """Check PX4 mission progress and update sector statuses automatically.
+
+    Maps the PX4 current waypoint index back to sectors via stored waypoint_index_range.
+    Marks sectors as completed when their waypoints have been passed.
+    Returns combined mission state + live telemetry.
+
+    Call this periodically during search pattern execution.
+
+    Args:
+        ctx: MCP context
+
+    Returns:
+        dict with mission progress, current sector, telemetry, and overall state
+    """
+    log_tool_call("monitor_search_progress")
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission."}
+        log_tool_output(result)
+        return result
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    drone = connector.drone
+    mission = connector.current_mission
+
+    try:
+        # Get PX4 mission progress
+        current_wp = 0
+        total_wp = 0
+        async for progress in drone.mission.mission_progress():
+            current_wp = progress.current
+            total_wp = progress.total
+            break
+
+        # Get drone position
+        position_data = {}
+        async for pos in drone.telemetry.position():
+            position_data = {
+                "latitude_deg": pos.latitude_deg,
+                "longitude_deg": pos.longitude_deg,
+                "relative_altitude_m": pos.relative_altitude_m,
+            }
+            break
+
+        # Get battery
+        battery_pct = None
+        try:
+            async for bat in drone.telemetry.battery():
+                battery_pct = round(bat.remaining_percent * 100, 1)
+                break
+        except Exception:
+            pass
+
+        # Update sector statuses based on current waypoint index
+        current_sector_id = None
+        for sector in mission.sectors:
+            start_idx, end_idx = sector.waypoint_index_range
+            if current_wp > end_idx and sector.status != SectorStatus.COMPLETED:
+                # Drone has passed all waypoints in this sector
+                sector.status = SectorStatus.COMPLETED
+                if sector.completed_at is None:
+                    sector.completed_at = time.time()
+            elif start_idx <= current_wp <= end_idx:
+                # Drone is currently in this sector
+                if sector.status != SectorStatus.ACTIVE:
+                    sector.status = SectorStatus.ACTIVE
+                    if sector.started_at is None:
+                        sector.started_at = time.time()
+                current_sector_id = sector.id
+
+        # Check if mission is complete
+        all_done = all(s.status == SectorStatus.COMPLETED for s in mission.sectors) if mission.sectors else False
+        if all_done and current_wp >= total_wp - 1:
+            mission.status = MissionStatus.COMPLETED
+
+        state = mission.to_dict()
+        result = {
+            "status": "success",
+            "px4_progress": {"current_waypoint": current_wp, "total_waypoints": total_wp},
+            "current_sector": current_sector_id,
+            "drone_state": {
+                "position": position_data,
+                "battery_pct": battery_pct,
+            },
+            "mission_complete": all_done,
+            **state,
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"{LogColors.ERROR}Monitor search progress failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Monitor failed: {str(e)}"}
+
+
+# ============================================================
+# Phase 2C: Vision Pipeline Hooks
+# ============================================================
+
+@mcp.tool()
+async def capture_image(ctx: Context, label: str = "") -> dict:
+    """Capture an image from the drone's camera.
+
+    In headless SITL mode, returns a synthetic image reference with GPS metadata.
+    When Cosys-AirSim is connected (future), will capture an actual frame.
+
+    Args:
+        ctx: MCP context
+        label: Optional label for the image (e.g. "sector-2-start", "anomaly-closeup")
+
+    Returns:
+        dict with image_ref, position metadata, and source info
+    """
+    log_tool_call("capture_image", label=label)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    drone = connector.drone
+
+    # Get current position for metadata
+    position_data = {}
+    try:
+        async for pos in drone.telemetry.position():
+            position_data = {
+                "latitude_deg": pos.latitude_deg,
+                "longitude_deg": pos.longitude_deg,
+                "relative_altitude_m": pos.relative_altitude_m,
+                "absolute_altitude_m": pos.absolute_altitude_m,
+            }
+            break
+    except Exception:
+        pass
+
+    # Generate image reference
+    mission_id = connector.current_mission.id if connector.current_mission else "no-mission"
+    image_ref = f"img-{mission_id}-{uuid.uuid4().hex[:6]}"
+
+    image_meta = {
+        "image_ref": image_ref,
+        "label": label,
+        "position": position_data,
+        "timestamp": time.time(),
+        "source": "synthetic",  # Will be "airsim" when Cosys-AirSim connected
+        "mission_id": mission_id,
+    }
+
+    # Store for later retrieval by analyze_image
+    _image_store[image_ref] = image_meta
+
+    result = {
+        "status": "success",
+        **image_meta,
+        "note": "Headless SITL — synthetic image ref. Connect Cosys-AirSim for real camera.",
+    }
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def analyze_image(ctx: Context, image_ref: str, prompt: str = "", auto_add_finding: bool = False) -> dict:
+    """Analyze a captured image for objects, damage, or anomalies.
+
+    In headless SITL mode, returns a mock analysis result.
+    When Cosys-AirSim is connected (future), will:
+    - Run CV models (YOLO/OpenCV) for real-time detection
+    - Send flagged frames to Claude Vision API for deep analysis
+
+    Args:
+        ctx: MCP context
+        image_ref: Reference from capture_image (e.g. "img-mission-abc123-def456")
+        prompt: What to look for (e.g. "Check for damaged solar panels")
+        auto_add_finding: If True and analysis detects something, auto-log as finding
+
+    Returns:
+        dict with analysis results and any detections
+    """
+    log_tool_call("analyze_image", image_ref=image_ref, prompt=prompt, auto_add_finding=auto_add_finding)
+    connector = ctx.request_context.lifespan_context
+
+    # Look up image metadata
+    image_meta = _image_store.get(image_ref)
+    if image_meta is None:
+        result = {"status": "failed", "error": f"Image ref '{image_ref}' not found. Use capture_image first."}
+        log_tool_output(result)
+        return result
+
+    # SITL stub — no real camera available
+    result = {
+        "status": "success",
+        "image_ref": image_ref,
+        "source": image_meta.get("source", "synthetic"),
+        "position": image_meta.get("position", {}),
+        "analysis": "Headless SITL — no camera available. Connect Cosys-AirSim for real vision analysis.",
+        "detections": [],
+        "prompt": prompt,
+        "note": "This is a stub. Real analysis requires Cosys-AirSim (Phase 2 vision tier).",
+    }
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def get_findings_near(ctx: Context, lat: float, lon: float, radius_m: float = 100.0) -> dict:
+    """Query mission findings within a radius of a GPS point.
+
+    Uses haversine distance for accurate filtering. Useful for checking if
+    an area has already been flagged before committing to a closer inspection.
+
+    Args:
+        ctx: MCP context
+        lat: Center latitude in degrees
+        lon: Center longitude in degrees
+        radius_m: Search radius in meters (default 100)
+
+    Returns:
+        dict with matching findings sorted by distance
+    """
+    log_tool_call("get_findings_near", lat=lat, lon=lon, radius_m=radius_m)
+    connector = ctx.request_context.lifespan_context
+
+    if connector.current_mission is None:
+        result = {"status": "failed", "error": "No active mission."}
+        log_tool_output(result)
+        return result
+
+    nearby = []
+    for f in connector.current_mission.findings:
+        dist = haversine_distance(lat, lon, f.lat, f.lon)
+        if dist <= radius_m:
+            nearby.append({
+                "id": f.id,
+                "type": f.type,
+                "lat": f.lat,
+                "lon": f.lon,
+                "confidence": f.confidence,
+                "distance_m": round(dist, 1),
+                "metadata": f.metadata,
+                "image_ref": f.image_ref,
+            })
+
+    nearby.sort(key=lambda x: x["distance_m"])
+
+    result = {
+        "status": "success",
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": radius_m,
+        "count": len(nearby),
+        "findings": nearby,
+    }
+    log_tool_output(result)
+    return result
 
 
 if __name__ == "__main__":
