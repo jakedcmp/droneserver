@@ -4036,8 +4036,21 @@ async def execute_grid_search(
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        # Small delay to let PX4 process the upload before starting
+        await asyncio.sleep(0.5)
+
         log_mavlink_cmd("drone.mission.start_mission")
         await drone.mission.start_mission()
+
+        # Verify PX4 entered mission mode
+        await asyncio.sleep(1.0)
+        flight_mode = None
+        try:
+            async for fm in drone.telemetry.flight_mode():
+                flight_mode = str(fm)
+                break
+        except Exception:
+            pass
 
         # Mark first sector as active
         if sectors:
@@ -4047,6 +4060,7 @@ async def execute_grid_search(
         result = {
             "status": "success",
             "message": f"Grid search started: {len(waypoints)} waypoints, {len(sectors)} passes",
+            "flight_mode": flight_mode,
             "mission_id": mission_id,
             "waypoint_count": len(waypoints),
             "sector_count": len(sectors),
@@ -4137,8 +4151,19 @@ async def execute_expanding_square(
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        await asyncio.sleep(0.5)
+
         log_mavlink_cmd("drone.mission.start_mission")
         await drone.mission.start_mission()
+
+        await asyncio.sleep(1.0)
+        flight_mode = None
+        try:
+            async for fm in drone.telemetry.flight_mode():
+                flight_mode = str(fm)
+                break
+        except Exception:
+            pass
 
         if sectors:
             sectors[0].status = SectorStatus.ACTIVE
@@ -4147,6 +4172,7 @@ async def execute_expanding_square(
         result = {
             "status": "success",
             "message": f"Expanding square started: {len(waypoints)} waypoints, {len(sectors)} legs",
+            "flight_mode": flight_mode,
             "mission_id": mission_id,
             "waypoint_count": len(waypoints),
             "sector_count": len(sectors),
@@ -4235,8 +4261,19 @@ async def execute_sector_search(
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        await asyncio.sleep(0.5)
+
         log_mavlink_cmd("drone.mission.start_mission")
         await drone.mission.start_mission()
+
+        await asyncio.sleep(1.0)
+        flight_mode = None
+        try:
+            async for fm in drone.telemetry.flight_mode():
+                flight_mode = str(fm)
+                break
+        except Exception:
+            pass
 
         if sectors:
             sectors[0].status = SectorStatus.ACTIVE
@@ -4245,6 +4282,7 @@ async def execute_sector_search(
         result = {
             "status": "success",
             "message": f"Sector search started: {len(waypoints)} waypoints, {len(sectors)} sectors",
+            "flight_mode": flight_mode,
             "mission_id": mission_id,
             "waypoint_count": len(waypoints),
             "sector_count": len(sectors),
@@ -4293,31 +4331,52 @@ async def monitor_search_progress(ctx: Context) -> dict:
     mission = connector.current_mission
 
     try:
-        # Get PX4 mission progress
+        # Helper to read one value from an async iterator with timeout
+        async def _read_one(aiter, timeout=5.0):
+            async for item in aiter:
+                return item
+            return None
+
+        # Get PX4 mission progress (may block if PX4 not in mission mode)
         current_wp = 0
         total_wp = 0
-        async for progress in drone.mission.mission_progress():
-            current_wp = progress.current
-            total_wp = progress.total
-            break
+        try:
+            progress = await asyncio.wait_for(_read_one(drone.mission.mission_progress()), timeout=5.0)
+            if progress:
+                current_wp = progress.current
+                total_wp = progress.total
+        except asyncio.TimeoutError:
+            logger.warning(f"{LogColors.YELLOW}mission_progress() timed out — PX4 may not be in mission mode{LogColors.RESET}")
 
         # Get drone position
         position_data = {}
-        async for pos in drone.telemetry.position():
-            position_data = {
-                "latitude_deg": pos.latitude_deg,
-                "longitude_deg": pos.longitude_deg,
-                "relative_altitude_m": pos.relative_altitude_m,
-            }
-            break
+        try:
+            pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
+            if pos:
+                position_data = {
+                    "latitude_deg": pos.latitude_deg,
+                    "longitude_deg": pos.longitude_deg,
+                    "relative_altitude_m": pos.relative_altitude_m,
+                }
+        except asyncio.TimeoutError:
+            logger.warning(f"{LogColors.YELLOW}position() timed out{LogColors.RESET}")
 
         # Get battery
         battery_pct = None
         try:
-            async for bat in drone.telemetry.battery():
+            bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
+            if bat:
                 battery_pct = round(bat.remaining_percent * 100, 1)
-                break
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
+            pass
+
+        # Get flight mode to help diagnose issues
+        flight_mode = None
+        try:
+            fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
+            if fm:
+                flight_mode = str(fm)
+        except (asyncio.TimeoutError, Exception):
             pass
 
         # Update sector statuses based on current waypoint index
@@ -4347,6 +4406,7 @@ async def monitor_search_progress(ctx: Context) -> dict:
             "status": "success",
             "px4_progress": {"current_waypoint": current_wp, "total_waypoints": total_wp},
             "current_sector": current_sector_id,
+            "flight_mode": flight_mode,
             "drone_state": {
                 "position": position_data,
                 "battery_pct": battery_pct,
