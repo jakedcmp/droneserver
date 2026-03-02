@@ -4039,7 +4039,7 @@ async def execute_grid_search(
         # Append explicit RTL waypoint (PX4 HOLD bug workaround)
         mission_items.append(MissionItem(
             seq=len(mission_items),
-            frame=3,  # MAV_FRAME_GLOBAL_RELATIVE_ALT
+            frame=2,  # MAV_FRAME_MISSION
             command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
             current=0,
             autocontinue=1,
@@ -4170,7 +4170,7 @@ async def execute_expanding_square(
         # Append explicit RTL waypoint (PX4 HOLD bug workaround)
         mission_items.append(MissionItem(
             seq=len(mission_items),
-            frame=3,
+            frame=2,  # MAV_FRAME_MISSION
             command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
             current=0,
             autocontinue=1,
@@ -4296,7 +4296,7 @@ async def execute_sector_search(
         # Append explicit RTL waypoint (PX4 HOLD bug workaround)
         mission_items.append(MissionItem(
             seq=len(mission_items),
-            frame=3,
+            frame=2,  # MAV_FRAME_MISSION
             command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
             current=0,
             autocontinue=1,
@@ -4753,7 +4753,7 @@ async def fly_waypoint_route(
         # Speed change item (MAV_CMD_DO_CHANGE_SPEED)
         mission_items.append(MissionItem(
             seq=0,
-            frame=3,
+            frame=2,  # MAV_FRAME_MISSION
             command=178,  # MAV_CMD_DO_CHANGE_SPEED
             current=1,
             autocontinue=1,
@@ -4786,7 +4786,7 @@ async def fly_waypoint_route(
         # RTL waypoint
         mission_items.append(MissionItem(
             seq=len(mission_items),
-            frame=3,
+            frame=2,  # MAV_FRAME_MISSION
             command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
             current=0,
             autocontinue=1,
@@ -4869,7 +4869,7 @@ async def orbit_point(
         # Speed change item
         mission_items.append(MissionItem(
             seq=0,
-            frame=3,
+            frame=2,  # MAV_FRAME_MISSION
             command=178,  # MAV_CMD_DO_CHANGE_SPEED
             current=1,
             autocontinue=1,
@@ -4909,8 +4909,8 @@ async def orbit_point(
         # RTL waypoint
         mission_items.append(MissionItem(
             seq=len(mission_items),
-            frame=3,
-            command=20,
+            frame=2,  # MAV_FRAME_MISSION
+            command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
             current=0,
             autocontinue=1,
             param1=0, param2=0, param3=0, param4=0,
