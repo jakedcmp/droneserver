@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from typing import Tuple
 from mavsdk import System
 from mavsdk.mission_raw import MissionItem
+from mavsdk.geofence import Point as GeoPoint, Polygon as GeoPolygon, FenceType, GeofenceData
 from enum import Enum
 import asyncio
 import os
@@ -543,6 +544,8 @@ class MAVLinkConnector:
     landing_in_progress: bool = field(default=False)
     # Mission state for Phase 2 mission intelligence
     current_mission: MissionState | None = field(default=None)
+    # Background battery monitor task
+    _battery_monitor_task: asyncio.Task | None = field(default=None)
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -4033,10 +4036,22 @@ async def execute_grid_search(
                 mission_type=0,
             ))
 
+        # Append explicit RTL waypoint (PX4 HOLD bug workaround)
+        mission_items.append(MissionItem(
+            seq=len(mission_items),
+            frame=3,  # MAV_FRAME_GLOBAL_RELATIVE_ALT
+            command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
+            current=0,
+            autocontinue=1,
+            param1=0, param2=0, param3=0, param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
-        # RTL after mission completes
+        # RTL flag as backup (may not work with mission_raw uploads)
         log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
         await drone.mission.set_return_to_launch_after_mission(True)
 
@@ -4152,9 +4167,22 @@ async def execute_expanding_square(
                 mission_type=0,
             ))
 
+        # Append explicit RTL waypoint (PX4 HOLD bug workaround)
+        mission_items.append(MissionItem(
+            seq=len(mission_items),
+            frame=3,
+            command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
+            current=0,
+            autocontinue=1,
+            param1=0, param2=0, param3=0, param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        # RTL flag as backup
         log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
         await drone.mission.set_return_to_launch_after_mission(True)
 
@@ -4265,9 +4293,22 @@ async def execute_sector_search(
                 mission_type=0,
             ))
 
+        # Append explicit RTL waypoint (PX4 HOLD bug workaround)
+        mission_items.append(MissionItem(
+            seq=len(mission_items),
+            frame=3,
+            command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
+            current=0,
+            autocontinue=1,
+            param1=0, param2=0, param3=0, param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
         log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
         await drone.mission_raw.upload_mission(mission_items)
 
+        # RTL flag as backup
         log_mavlink_cmd("drone.mission.set_return_to_launch_after_mission", return_to_launch=True)
         await drone.mission.set_return_to_launch_after_mission(True)
 
@@ -4423,6 +4464,13 @@ async def monitor_search_progress(ctx: Context) -> dict:
                     )
                     last_wp_reached = last_dist < WAYPOINT_REACHED_M
 
+                # Bug 3 fix: if waypoint proximity missed, check sector bounds
+                if not near_sector and sector.bounds:
+                    b = sector.bounds
+                    if (b.get("south", 90) <= drone_lat <= b.get("north", -90) and
+                            b.get("west", 180) <= drone_lon <= b.get("east", -180)):
+                        near_sector = True
+
                 if near_sector:
                     if sector.status != SectorStatus.ACTIVE:
                         sector.status = SectorStatus.ACTIVE
@@ -4460,6 +4508,19 @@ async def monitor_search_progress(ctx: Context) -> dict:
                         if sector.started_at is None:
                             sector.started_at = time.time()
                     current_sector_id = sector.id
+
+        # Bug 2 fix: when PX4 transitions to HOLD/RTL/LAND after mission,
+        # mark all remaining active/pending sectors as complete.
+        # Guard: only if at least one sector was previously completed (avoids false trigger on takeoff).
+        if flight_mode and flight_mode.upper() in ("HOLD", "RETURN_TO_LAUNCH", "LAND"):
+            any_completed = any(s.status == SectorStatus.COMPLETED for s in mission.sectors)
+            any_active = any(s.status == SectorStatus.ACTIVE for s in mission.sectors)
+            if any_completed or any_active:
+                for sector in mission.sectors:
+                    if sector.status in (SectorStatus.ACTIVE, SectorStatus.PENDING):
+                        sector.status = SectorStatus.COMPLETED
+                        if sector.completed_at is None:
+                            sector.completed_at = time.time()
 
         # Check if mission is complete
         all_done = all(s.status == SectorStatus.COMPLETED for s in mission.sectors) if mission.sectors else False
@@ -4642,6 +4703,410 @@ async def get_findings_near(ctx: Context, lat: float, lon: float, radius_m: floa
         "radius_m": radius_m,
         "count": len(nearby),
         "findings": nearby,
+    }
+    log_tool_output(result)
+    return result
+
+
+# ============================================================
+# Phase 2D: Extended Navigation & Safety Tools
+# ============================================================
+
+@mcp.tool()
+async def fly_waypoint_route(
+    ctx: Context, waypoints: list[dict], altitude: float, speed: float = 5.0
+) -> dict:
+    """Execute a custom multi-waypoint route.
+
+    Uploads waypoints as a PX4 mission, sets cruise speed, and starts.
+    The drone must be armed and airborne.
+
+    Args:
+        ctx: MCP context
+        waypoints: List of waypoints, each with "lat" and "lon" keys (degrees).
+                   Example: [{"lat": 47.397, "lon": 8.546}, {"lat": 47.398, "lon": 8.547}]
+        altitude: Flight altitude in meters (relative to home), applied to all waypoints
+        speed: Cruise speed in m/s (default 5.0)
+
+    Returns:
+        dict with waypoint count and estimated total distance
+    """
+    log_tool_call("fly_waypoint_route", waypoint_count=len(waypoints), altitude=altitude, speed=speed)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    if len(waypoints) < 2:
+        return {"status": "failed", "error": "Need at least 2 waypoints."}
+    if len(waypoints) > 200:
+        return {"status": "failed", "error": f"Too many waypoints ({len(waypoints)}). Max 200."}
+
+    for i, wp in enumerate(waypoints):
+        if "lat" not in wp or "lon" not in wp:
+            return {"status": "failed", "error": f"Waypoint {i} missing 'lat' or 'lon' key."}
+
+    drone = connector.drone
+    try:
+        mission_items = []
+
+        # Speed change item (MAV_CMD_DO_CHANGE_SPEED)
+        mission_items.append(MissionItem(
+            seq=0,
+            frame=3,
+            command=178,  # MAV_CMD_DO_CHANGE_SPEED
+            current=1,
+            autocontinue=1,
+            param1=1,  # speed type: ground speed
+            param2=float(speed),
+            param3=-1,  # no throttle change
+            param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
+        # Navigation waypoints
+        for i, wp in enumerate(waypoints):
+            mission_items.append(MissionItem(
+                seq=len(mission_items),
+                frame=3,
+                command=16,  # MAV_CMD_NAV_WAYPOINT
+                current=0,
+                autocontinue=1,
+                param1=0,
+                param2=2.0,  # acceptance radius
+                param3=0,
+                param4=float('nan'),
+                x=int(wp["lat"] * 1e7),
+                y=int(wp["lon"] * 1e7),
+                z=float(altitude),
+                mission_type=0,
+            ))
+
+        # RTL waypoint
+        mission_items.append(MissionItem(
+            seq=len(mission_items),
+            frame=3,
+            command=20,  # MAV_CMD_NAV_RETURN_TO_LAUNCH
+            current=0,
+            autocontinue=1,
+            param1=0, param2=0, param3=0, param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
+        # Calculate total distance
+        total_dist = 0.0
+        for i in range(1, len(waypoints)):
+            total_dist += haversine_distance(
+                waypoints[i - 1]["lat"], waypoints[i - 1]["lon"],
+                waypoints[i]["lat"], waypoints[i]["lon"]
+            )
+
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+        await drone.mission_raw.upload_mission(mission_items)
+
+        await asyncio.sleep(0.5)
+
+        log_mavlink_cmd("drone.mission.start_mission")
+        await drone.mission.start_mission()
+
+        result = {
+            "status": "success",
+            "message": f"Route started: {len(waypoints)} waypoints at {altitude}m, speed {speed} m/s",
+            "waypoint_count": len(waypoints),
+            "total_distance_m": round(total_dist, 1),
+            "estimated_time_s": round(total_dist / speed, 1) if speed > 0 else None,
+            "altitude_m": altitude,
+            "speed_m_s": speed,
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"{LogColors.ERROR}fly_waypoint_route failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Route failed: {str(e)}"}
+
+
+@mcp.tool()
+async def orbit_point(
+    ctx: Context, lat: float, lon: float, radius: float,
+    altitude: float, laps: int = 1, speed: float = 5.0
+) -> dict:
+    """Orbit (circle) around a GPS point.
+
+    Generates a circular waypoint mission with 12 points per lap.
+    More reliable than MAV_CMD_DO_ORBIT in PX4 SITL.
+
+    Args:
+        ctx: MCP context
+        lat: Center latitude in degrees
+        lon: Center longitude in degrees
+        radius: Orbit radius in meters
+        altitude: Flight altitude in meters (relative)
+        laps: Number of laps (default 1)
+        speed: Cruise speed in m/s (default 5.0)
+
+    Returns:
+        dict with orbit parameters and waypoint count
+    """
+    log_tool_call("orbit_point", lat=lat, lon=lon, radius=radius, altitude=altitude, laps=laps, speed=speed)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    if radius < 5:
+        return {"status": "failed", "error": "Radius must be at least 5 meters."}
+    if laps < 1 or laps > 20:
+        return {"status": "failed", "error": "Laps must be between 1 and 20."}
+
+    drone = connector.drone
+    try:
+        points_per_lap = 12
+        mission_items = []
+
+        # Speed change item
+        mission_items.append(MissionItem(
+            seq=0,
+            frame=3,
+            command=178,  # MAV_CMD_DO_CHANGE_SPEED
+            current=1,
+            autocontinue=1,
+            param1=1,
+            param2=float(speed),
+            param3=-1,
+            param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
+        # Generate circular waypoints
+        for lap in range(laps):
+            for j in range(points_per_lap):
+                angle_deg = (360.0 / points_per_lap) * j
+                angle_rad = math.radians(angle_deg)
+                north_m = radius * math.cos(angle_rad)
+                east_m = radius * math.sin(angle_rad)
+                wp_lat, wp_lon = offset_gps(lat, lon, north_m, east_m)
+
+                mission_items.append(MissionItem(
+                    seq=len(mission_items),
+                    frame=3,
+                    command=16,
+                    current=0,
+                    autocontinue=1,
+                    param1=0,
+                    param2=2.0,
+                    param3=0,
+                    param4=float('nan'),
+                    x=int(wp_lat * 1e7),
+                    y=int(wp_lon * 1e7),
+                    z=float(altitude),
+                    mission_type=0,
+                ))
+
+        # RTL waypoint
+        mission_items.append(MissionItem(
+            seq=len(mission_items),
+            frame=3,
+            command=20,
+            current=0,
+            autocontinue=1,
+            param1=0, param2=0, param3=0, param4=0,
+            x=0, y=0, z=0,
+            mission_type=0,
+        ))
+
+        log_mavlink_cmd("drone.mission_raw.upload_mission", waypoint_count=len(mission_items))
+        await drone.mission_raw.upload_mission(mission_items)
+
+        await asyncio.sleep(0.5)
+
+        log_mavlink_cmd("drone.mission.start_mission")
+        await drone.mission.start_mission()
+
+        circumference = 2 * math.pi * radius
+        total_dist = circumference * laps
+
+        result = {
+            "status": "success",
+            "message": f"Orbiting ({lat:.5f}, {lon:.5f}) at {radius}m radius, {laps} lap(s)",
+            "center": {"lat": lat, "lon": lon},
+            "radius_m": radius,
+            "laps": laps,
+            "altitude_m": altitude,
+            "speed_m_s": speed,
+            "waypoint_count": len(mission_items) - 2,  # exclude speed + RTL items
+            "total_distance_m": round(total_dist, 1),
+            "estimated_time_s": round(total_dist / speed, 1) if speed > 0 else None,
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"{LogColors.ERROR}orbit_point failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Orbit failed: {str(e)}"}
+
+
+@mcp.tool()
+async def set_geofence(ctx: Context, bounds: dict) -> dict:
+    """Set an inclusion geofence boundary.
+
+    Creates a rectangular geofence from bounds. The drone will be confined
+    to this area. PX4 will trigger RTL/LAND if the drone exits the fence.
+
+    Args:
+        ctx: MCP context
+        bounds: Area bounds as {north, south, east, west} in lat/lon degrees
+
+    Returns:
+        dict with geofence parameters
+    """
+    log_tool_call("set_geofence", bounds=bounds)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    required_keys = ["north", "south", "east", "west"]
+    missing = [k for k in required_keys if k not in bounds]
+    if missing:
+        return {"status": "failed", "error": f"Bounds missing keys: {missing}"}
+
+    drone = connector.drone
+    try:
+        # Create 4-corner inclusion polygon
+        corners = [
+            GeoPoint(bounds["north"], bounds["west"]),  # NW
+            GeoPoint(bounds["north"], bounds["east"]),  # NE
+            GeoPoint(bounds["south"], bounds["east"]),  # SE
+            GeoPoint(bounds["south"], bounds["west"]),  # SW
+        ]
+        polygon = GeoPolygon(corners, FenceType.INCLUSION)
+        geofence_data = GeofenceData([polygon], [])
+
+        log_mavlink_cmd("drone.geofence.upload_geofence", corners=4)
+        await drone.geofence.upload_geofence(geofence_data)
+
+        result = {
+            "status": "success",
+            "message": "Geofence set — drone confined to bounds",
+            "bounds": bounds,
+            "type": "inclusion",
+            "note": "PX4 will RTL/LAND if drone exits the fence. Use clear_geofence() to remove.",
+        }
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"{LogColors.ERROR}set_geofence failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Geofence failed: {str(e)}"}
+
+
+@mcp.tool()
+async def clear_geofence(ctx: Context) -> dict:
+    """Clear all geofence boundaries.
+
+    Removes any previously uploaded geofence, allowing the drone to fly freely.
+
+    Args:
+        ctx: MCP context
+
+    Returns:
+        dict confirming geofence cleared
+    """
+    log_tool_call("clear_geofence")
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    drone = connector.drone
+    try:
+        log_mavlink_cmd("drone.geofence.clear_geofence")
+        await drone.geofence.clear_geofence()
+
+        result = {"status": "success", "message": "Geofence cleared."}
+        log_tool_output(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"{LogColors.ERROR}clear_geofence failed: {e}{LogColors.RESET}")
+        return {"status": "failed", "error": f"Clear geofence failed: {str(e)}"}
+
+
+@mcp.tool()
+async def return_to_launch_if_low_battery(ctx: Context, threshold: float = 20.0) -> dict:
+    """Start a background battery monitor that triggers RTL if battery drops below threshold.
+
+    Checks battery every 5 seconds. If remaining percent falls below the threshold,
+    commands RTL and aborts any active mission. Only one monitor can be active at a time.
+
+    Args:
+        ctx: MCP context
+        threshold: Battery percentage below which to trigger RTL (default 20.0)
+
+    Returns:
+        dict confirming monitor started
+    """
+    log_tool_call("return_to_launch_if_low_battery", threshold=threshold)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    if threshold < 5 or threshold > 80:
+        return {"status": "failed", "error": "Threshold must be between 5 and 80 percent."}
+
+    drone = connector.drone
+
+    # Cancel any existing monitor
+    if connector._battery_monitor_task and not connector._battery_monitor_task.done():
+        connector._battery_monitor_task.cancel()
+        try:
+            await connector._battery_monitor_task
+        except asyncio.CancelledError:
+            pass
+
+    async def _battery_monitor(threshold_pct: float):
+        """Background task: check battery, RTL if low."""
+        logger.info(f"{LogColors.STATUS}Battery monitor started — RTL below {threshold_pct}%{LogColors.RESET}")
+        try:
+            while True:
+                await asyncio.sleep(5.0)
+                try:
+                    async def _read_battery():
+                        async for bat in drone.telemetry.battery():
+                            return bat
+                        return None
+
+                    bat = await asyncio.wait_for(_read_battery(), timeout=5.0)
+                    if bat:
+                        pct = bat.remaining_percent * 100
+                        if pct < threshold_pct:
+                            logger.warning(
+                                f"{LogColors.ERROR}Battery {pct:.1f}% below threshold "
+                                f"{threshold_pct}% — commanding RTL!{LogColors.RESET}"
+                            )
+                            # Abort mission if active
+                            if connector.current_mission and connector.current_mission.status == MissionStatus.ACTIVE:
+                                connector.current_mission.status = MissionStatus.ABORTED
+                            await drone.action.return_to_launch()
+                            logger.info(f"{LogColors.SUCCESS}RTL commanded due to low battery{LogColors.RESET}")
+                            return  # Stop monitoring after triggering
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(f"{LogColors.YELLOW}Battery monitor read error: {e}{LogColors.RESET}")
+        except asyncio.CancelledError:
+            logger.info(f"{LogColors.STATUS}Battery monitor cancelled{LogColors.RESET}")
+
+    connector._battery_monitor_task = asyncio.create_task(_battery_monitor(threshold))
+
+    result = {
+        "status": "success",
+        "message": f"Battery monitor active — RTL if below {threshold}%",
+        "threshold_pct": threshold,
+        "check_interval_s": 5,
     }
     log_tool_output(result)
     return result
