@@ -559,6 +559,157 @@ class FlightActivity:
 
 
 @dataclass
+class TelemetryCacheEntry:
+    """Single cached telemetry value with timestamp."""
+    value: object = None
+    updated_at: float = 0.0
+
+
+class TelemetryService:
+    """Persistent MAVSDK stream subscriptions with in-memory cache.
+
+    Subscribes to 10 telemetry streams once at startup. Each stream runs in its
+    own asyncio.Task, updating a cache dict on every value. Reads become instant
+    dict lookups instead of blocking MAVSDK calls.
+    """
+
+    STREAMS = [
+        "position", "battery", "flight_mode", "velocity_ned",
+        "landed_state", "heading", "in_air", "armed",
+        "health", "mission_progress",
+    ]
+    STALE_THRESHOLD_S = 10.0
+
+    def __init__(self, drone: System):
+        self._drone = drone
+        self._cache: dict[str, TelemetryCacheEntry] = {
+            name: TelemetryCacheEntry() for name in self.STREAMS
+        }
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    async def start(self):
+        """Create background tasks for all telemetry streams."""
+        logger.info(f"{LogColors.STATUS}TelemetryService: Starting {len(self.STREAMS)} streams...{LogColors.RESET}")
+        stream_sources = {
+            "position": self._drone.telemetry.position,
+            "battery": self._drone.telemetry.battery,
+            "flight_mode": self._drone.telemetry.flight_mode,
+            "velocity_ned": self._drone.telemetry.velocity_ned,
+            "landed_state": self._drone.telemetry.landed_state,
+            "heading": self._drone.telemetry.heading,
+            "in_air": self._drone.telemetry.in_air,
+            "armed": self._drone.telemetry.armed,
+            "health": self._drone.telemetry.health,
+            "mission_progress": self._drone.mission.mission_progress,
+        }
+        for name, source_fn in stream_sources.items():
+            self._tasks[name] = asyncio.create_task(
+                self._stream_loop(name, source_fn),
+                name=f"telemetry-{name}",
+            )
+        logger.info(f"{LogColors.SUCCESS}TelemetryService: All streams launched{LogColors.RESET}")
+
+    async def stop(self):
+        """Cancel all stream tasks cleanly."""
+        logger.info(f"{LogColors.STATUS}TelemetryService: Stopping...{LogColors.RESET}")
+        for name, task in self._tasks.items():
+            task.cancel()
+        for name, task in self._tasks.items():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._tasks.clear()
+        logger.info(f"{LogColors.STATUS}TelemetryService: Stopped{LogColors.RESET}")
+
+    async def _stream_loop(self, name: str, source_fn):
+        """Subscribe to one MAVSDK stream, updating cache on every value. Auto-reconnects on error."""
+        while True:
+            try:
+                async for value in source_fn():
+                    self._cache[name] = TelemetryCacheEntry(
+                        value=value, updated_at=time.time()
+                    )
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(
+                    f"{LogColors.YELLOW}TelemetryService: stream '{name}' error: {e} — reconnecting in 2s{LogColors.RESET}"
+                )
+                await asyncio.sleep(2.0)
+
+    def get(self, name: str):
+        """Return cached MAVSDK object (or None if never received)."""
+        entry = self._cache.get(name)
+        if entry is None or entry.value is None:
+            return None
+        age = time.time() - entry.updated_at
+        if age > self.STALE_THRESHOLD_S:
+            logger.warning(
+                f"{LogColors.YELLOW}TelemetryService: '{name}' is stale ({age:.1f}s old){LogColors.RESET}"
+            )
+        return entry.value
+
+    def get_age(self, name: str) -> float:
+        """Seconds since last update for a stream (inf if never received)."""
+        entry = self._cache.get(name)
+        if entry is None or entry.updated_at == 0.0:
+            return float("inf")
+        return time.time() - entry.updated_at
+
+    def get_snapshot(self) -> dict:
+        """All telemetry as a JSON-serializable dict for tools and future WebSocket push."""
+        pos = self.get("position")
+        vel = self.get("velocity_ned")
+        bat = self.get("battery")
+        fm = self.get("flight_mode")
+        ls = self.get("landed_state")
+        hdg = self.get("heading")
+        in_air = self.get("in_air")
+        armed = self.get("armed")
+        mp = self.get("mission_progress")
+
+        position = None
+        if pos:
+            position = {
+                "lat": round(pos.latitude_deg, 7),
+                "lon": round(pos.longitude_deg, 7),
+                "alt_relative_m": round(pos.relative_altitude_m, 1),
+                "alt_msl_m": round(pos.absolute_altitude_m, 1),
+            }
+
+        speed_m_s = None
+        if vel:
+            speed_m_s = round(math.sqrt(vel.north_m_s**2 + vel.east_m_s**2), 1)
+
+        flight_mode = str(fm).split(".")[-1] if fm else "UNKNOWN"
+        landed_state = str(ls).split(".")[-1] if ls else "UNKNOWN"
+        is_on_ground = landed_state == "ON_GROUND"
+
+        battery_pct = round(bat.remaining_percent, 1) if bat else -1
+
+        mission_current = mp.current if mp else 0
+        mission_total = mp.total if mp else 0
+
+        snapshot = {
+            "position": position,
+            "flight_mode": flight_mode,
+            "battery_pct": battery_pct,
+            "speed_m_s": speed_m_s,
+            "landed_state": landed_state,
+            "is_on_ground": is_on_ground,
+            "heading_deg": round(hdg.heading_deg, 1) if hdg else None,
+            "in_air": in_air if isinstance(in_air, bool) else None,
+            "armed": armed if isinstance(armed, bool) else None,
+            "mission_progress": {"current": mission_current, "total": mission_total},
+            "_cache_ages_s": {
+                name: round(self.get_age(name), 1) for name in self.STREAMS
+            },
+        }
+        return snapshot
+
+
+@dataclass
 class MAVLinkConnector:
     drone: System
     connection_ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -568,6 +719,8 @@ class MAVLinkConnector:
     current_mission: MissionState | None = field(default=None)
     # Background battery monitor task
     _battery_monitor_task: asyncio.Task | None = field(default=None)
+    # Persistent telemetry cache (TelemetryService)
+    telemetry: TelemetryService | None = field(default=None)
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -593,13 +746,17 @@ async def ensure_connection(connector: MAVLinkConnector, timeout: float = 30.0) 
         logger.error(f"{LogColors.ERROR}❌ Drone connection timeout after {timeout}s{LogColors.RESET}")
         return False
 
-async def connect_drone_background(drone: System, address: str, port: str, protocol: str, connection_ready: asyncio.Event):
-    """Connect to drone in the background without blocking server startup"""
+async def connect_drone_background(connector: MAVLinkConnector, address: str, port: str, protocol: str):
+    """Connect to drone in the background without blocking server startup.
+
+    After GPS lock, starts the TelemetryService (if present on connector).
+    """
+    drone = connector.drone
     connection_string = f"{protocol}://{address}:{port}"
     logger.info("Background: Connecting to drone...")
     logger.info("  Protocol: %s", protocol.upper())
     logger.info("  Target: %s:%s", address, port)
-    
+
     await drone.connect(system_address=connection_string)
 
     logger.info("Background: Waiting for drone to respond...")
@@ -618,10 +775,13 @@ async def connect_drone_background(drone: System, address: str, port: str, proto
             logger.info("  Global position: %s", "OK" if health.is_global_position_ok else "Not ready")
             logger.info("  Home position: %s", "OK" if health.is_home_position_ok else "Not ready")
             logger.info("=" * 60)
+            # Start TelemetryService now that MAVSDK streams are available
+            if connector.telemetry:
+                await connector.telemetry.start()
             logger.info("Drone is READY for commands")
             logger.info("=" * 60)
             # Signal that connection is ready!
-            connection_ready.set()
+            connector.connection_ready.set()
             break
 
 
@@ -664,16 +824,20 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
         drone = System()
         connection_ready = asyncio.Event()
         
-        # Create the global connector
-        _global_connector = MAVLinkConnector(drone=drone, connection_ready=connection_ready)
-        
+        # Create the global connector with TelemetryService
+        _global_connector = MAVLinkConnector(
+            drone=drone,
+            connection_ready=connection_ready,
+            telemetry=TelemetryService(drone),
+        )
+
         # Start drone connection in background
         logger.info("Starting persistent drone connection in background...")
         logger.info("This connection will be shared across all requests")
         logger.info("-" * 60)
-        
+
         _connection_task = asyncio.create_task(
-            connect_drone_background(drone, address, port, protocol, connection_ready)
+            connect_drone_background(_global_connector, address, port, protocol)
         )
         
         return _global_connector
@@ -4490,53 +4654,63 @@ async def monitor_search_progress(ctx: Context) -> dict:
     mission = connector.current_mission
 
     try:
-        # Helper to read one value from an async iterator with timeout
-        async def _read_one(aiter, timeout=5.0):
-            async for item in aiter:
-                return item
-            return None
+        # Read telemetry from cache (instant) or fallback to direct reads
+        if connector.telemetry:
+            snapshot = connector.telemetry.get_snapshot()
+            mp = snapshot["mission_progress"]
+            current_wp = mp["current"]
+            total_wp = mp["total"]
+            pos_snap = snapshot["position"]
+            position_data = {
+                "latitude_deg": pos_snap["lat"],
+                "longitude_deg": pos_snap["lon"],
+                "relative_altitude_m": pos_snap["alt_relative_m"],
+            } if pos_snap else {}
+            battery_pct = snapshot["battery_pct"] if snapshot["battery_pct"] != -1 else None
+            flight_mode = snapshot["flight_mode"]
+        else:
+            async def _read_one(aiter, timeout=5.0):
+                async for item in aiter:
+                    return item
+                return None
 
-        # Get PX4 mission progress (may block if PX4 not in mission mode)
-        current_wp = 0
-        total_wp = 0
-        try:
-            progress = await asyncio.wait_for(_read_one(drone.mission.mission_progress()), timeout=5.0)
-            if progress:
-                current_wp = progress.current
-                total_wp = progress.total
-        except asyncio.TimeoutError:
-            logger.warning(f"{LogColors.YELLOW}mission_progress() timed out — PX4 may not be in mission mode{LogColors.RESET}")
+            current_wp = 0
+            total_wp = 0
+            try:
+                progress = await asyncio.wait_for(_read_one(drone.mission.mission_progress()), timeout=5.0)
+                if progress:
+                    current_wp = progress.current
+                    total_wp = progress.total
+            except asyncio.TimeoutError:
+                logger.warning(f"{LogColors.YELLOW}mission_progress() timed out — PX4 may not be in mission mode{LogColors.RESET}")
 
-        # Get drone position
-        position_data = {}
-        try:
-            pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
-            if pos:
-                position_data = {
-                    "latitude_deg": pos.latitude_deg,
-                    "longitude_deg": pos.longitude_deg,
-                    "relative_altitude_m": pos.relative_altitude_m,
-                }
-        except asyncio.TimeoutError:
-            logger.warning(f"{LogColors.YELLOW}position() timed out{LogColors.RESET}")
+            position_data = {}
+            try:
+                pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
+                if pos:
+                    position_data = {
+                        "latitude_deg": pos.latitude_deg,
+                        "longitude_deg": pos.longitude_deg,
+                        "relative_altitude_m": pos.relative_altitude_m,
+                    }
+            except asyncio.TimeoutError:
+                logger.warning(f"{LogColors.YELLOW}position() timed out{LogColors.RESET}")
 
-        # Get battery
-        battery_pct = None
-        try:
-            bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
-            if bat:
-                battery_pct = round(bat.remaining_percent, 1)
-        except (asyncio.TimeoutError, Exception):
-            pass
+            battery_pct = None
+            try:
+                bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
+                if bat:
+                    battery_pct = round(bat.remaining_percent, 1)
+            except (asyncio.TimeoutError, Exception):
+                pass
 
-        # Get flight mode to help diagnose issues
-        flight_mode = None
-        try:
-            fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
-            if fm:
-                flight_mode = str(fm)
-        except (asyncio.TimeoutError, Exception):
-            pass
+            flight_mode = None
+            try:
+                fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
+                if fm:
+                    flight_mode = str(fm).split(".")[-1]
+            except (asyncio.TimeoutError, Exception):
+                pass
 
         # Update sector statuses using position-based proximity
         # (PX4 mission_progress may return 0/0 when using mission_raw upload)
@@ -5217,31 +5391,34 @@ async def return_to_launch_if_low_battery(ctx: Context, threshold: float = 20.0)
             pass
 
     async def _battery_monitor(threshold_pct: float):
-        """Background task: check battery, RTL if low."""
+        """Background task: check battery from cache, RTL if low."""
         logger.info(f"{LogColors.STATUS}Battery monitor started — RTL below {threshold_pct}%{LogColors.RESET}")
         try:
             while True:
                 await asyncio.sleep(5.0)
                 try:
-                    async def _read_battery():
-                        async for bat in drone.telemetry.battery():
-                            return bat
-                        return None
+                    if connector.telemetry:
+                        bat = connector.telemetry.get("battery")
+                        pct = bat.remaining_percent * 100 if bat else None
+                    else:
+                        async def _read_battery():
+                            async for bat in drone.telemetry.battery():
+                                return bat
+                            return None
+                        bat_obj = await asyncio.wait_for(_read_battery(), timeout=5.0)
+                        pct = bat_obj.remaining_percent * 100 if bat_obj else None
 
-                    bat = await asyncio.wait_for(_read_battery(), timeout=5.0)
-                    if bat:
-                        pct = bat.remaining_percent * 100
-                        if pct < threshold_pct:
-                            logger.warning(
-                                f"{LogColors.ERROR}Battery {pct:.1f}% below threshold "
-                                f"{threshold_pct}% — commanding RTL!{LogColors.RESET}"
-                            )
-                            # Abort mission if active
-                            if connector.current_mission and connector.current_mission.status == MissionStatus.ACTIVE:
-                                connector.current_mission.status = MissionStatus.ABORTED
-                            await drone.action.return_to_launch()
-                            logger.info(f"{LogColors.SUCCESS}RTL commanded due to low battery{LogColors.RESET}")
-                            return  # Stop monitoring after triggering
+                    if pct is not None and pct < threshold_pct:
+                        logger.warning(
+                            f"{LogColors.ERROR}Battery {pct:.1f}% below threshold "
+                            f"{threshold_pct}% — commanding RTL!{LogColors.RESET}"
+                        )
+                        # Abort mission if active
+                        if connector.current_mission and connector.current_mission.status == MissionStatus.ACTIVE:
+                            connector.current_mission.status = MissionStatus.ABORTED
+                        await drone.action.return_to_launch()
+                        logger.info(f"{LogColors.SUCCESS}RTL commanded due to low battery{LogColors.RESET}")
+                        return  # Stop monitoring after triggering
                 except (asyncio.TimeoutError, Exception) as e:
                     logger.warning(f"{LogColors.YELLOW}Battery monitor read error: {e}{LogColors.RESET}")
         except asyncio.CancelledError:
@@ -5270,7 +5447,8 @@ async def get_drone_activity(ctx: Context) -> dict:
     Returns activity status, telemetry (position, battery, speed, flight mode),
     navigation progress, and mission state (if a search is active).
 
-    Call this repeatedly (every 5-10s) to monitor any flight in progress.
+    Call this repeatedly (every 1-2s) to monitor any flight in progress.
+    Uses cached telemetry streams — response time is <100ms.
     """
     log_tool_call("get_drone_activity")
     connector = ctx.request_context.lifespan_context
@@ -5280,60 +5458,75 @@ async def get_drone_activity(ctx: Context) -> dict:
 
     drone = connector.drone
 
-    async def _read_one(aiter, timeout=5.0):
-        async for item in aiter:
-            return item
-        return None
+    # --- Telemetry from cache (instant) or fallback to direct reads ---
+    if connector.telemetry:
+        snapshot = connector.telemetry.get_snapshot()
+        telemetry = {
+            "position": snapshot["position"],
+            "flight_mode": snapshot["flight_mode"],
+            "battery_pct": snapshot["battery_pct"],
+            "speed_m_s": snapshot["speed_m_s"],
+            "landed_state": snapshot["landed_state"],
+            "is_on_ground": snapshot["is_on_ground"],
+            "_cache_ages_s": snapshot["_cache_ages_s"],
+        }
+        flight_mode = snapshot["flight_mode"]
+        landed_state = snapshot["landed_state"]
+        is_on_ground = snapshot["is_on_ground"]
+    else:
+        # Fallback: direct MAVSDK reads (only if TelemetryService not available)
+        async def _read_one(aiter, timeout=5.0):
+            async for item in aiter:
+                return item
+            return None
 
-    # --- Telemetry (always present) ---
-    telemetry = {}
-    try:
-        pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
-        if pos:
-            telemetry["position"] = {
-                "lat": round(pos.latitude_deg, 7),
-                "lon": round(pos.longitude_deg, 7),
-                "alt_relative_m": round(pos.relative_altitude_m, 1),
-                "alt_msl_m": round(pos.absolute_altitude_m, 1),
-            }
-    except asyncio.TimeoutError:
-        telemetry["position"] = None
+        telemetry = {}
+        try:
+            pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
+            if pos:
+                telemetry["position"] = {
+                    "lat": round(pos.latitude_deg, 7),
+                    "lon": round(pos.longitude_deg, 7),
+                    "alt_relative_m": round(pos.relative_altitude_m, 1),
+                    "alt_msl_m": round(pos.absolute_altitude_m, 1),
+                }
+        except asyncio.TimeoutError:
+            telemetry["position"] = None
 
-    try:
-        fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
-        flight_mode = str(fm).split(".")[-1] if fm else "UNKNOWN"
-        telemetry["flight_mode"] = flight_mode
-    except asyncio.TimeoutError:
-        flight_mode = "UNKNOWN"
-        telemetry["flight_mode"] = flight_mode
+        try:
+            fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
+            flight_mode = str(fm).split(".")[-1] if fm else "UNKNOWN"
+            telemetry["flight_mode"] = flight_mode
+        except asyncio.TimeoutError:
+            flight_mode = "UNKNOWN"
+            telemetry["flight_mode"] = flight_mode
 
-    try:
-        bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
-        telemetry["battery_pct"] = round(bat.remaining_percent, 1) if bat else -1
-    except asyncio.TimeoutError:
-        telemetry["battery_pct"] = -1  # Timeout — battery telemetry unavailable
+        try:
+            bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
+            telemetry["battery_pct"] = round(bat.remaining_percent, 1) if bat else -1
+        except asyncio.TimeoutError:
+            telemetry["battery_pct"] = -1
 
-    try:
-        vel = await asyncio.wait_for(_read_one(drone.telemetry.velocity_ned()), timeout=5.0)
-        if vel:
-            speed = math.sqrt(vel.north_m_s**2 + vel.east_m_s**2)
-            telemetry["speed_m_s"] = round(speed, 1)
-        else:
+        try:
+            vel = await asyncio.wait_for(_read_one(drone.telemetry.velocity_ned()), timeout=5.0)
+            if vel:
+                speed = math.sqrt(vel.north_m_s**2 + vel.east_m_s**2)
+                telemetry["speed_m_s"] = round(speed, 1)
+            else:
+                telemetry["speed_m_s"] = None
+        except asyncio.TimeoutError:
             telemetry["speed_m_s"] = None
-    except asyncio.TimeoutError:
-        telemetry["speed_m_s"] = None
 
-    # --- Landing state detection ---
-    landed_state = "UNKNOWN"
-    is_on_ground = False
-    try:
-        ls = await asyncio.wait_for(_read_one(drone.telemetry.landed_state()), timeout=5.0)
-        landed_state = str(ls).split(".")[-1] if ls else "UNKNOWN"
-        is_on_ground = landed_state == "ON_GROUND"
-    except asyncio.TimeoutError:
-        pass
-    telemetry["landed_state"] = landed_state
-    telemetry["is_on_ground"] = is_on_ground
+        landed_state = "UNKNOWN"
+        is_on_ground = False
+        try:
+            ls = await asyncio.wait_for(_read_one(drone.telemetry.landed_state()), timeout=5.0)
+            landed_state = str(ls).split(".")[-1] if ls else "UNKNOWN"
+            is_on_ground = landed_state == "ON_GROUND"
+        except asyncio.TimeoutError:
+            pass
+        telemetry["landed_state"] = landed_state
+        telemetry["is_on_ground"] = is_on_ground
 
     activity = connector.current_activity
 
@@ -5404,13 +5597,22 @@ async def get_drone_activity(ctx: Context) -> dict:
     if activity.type in ("waypoint_route", "orbit", "search"):
         current_wp = 0
         total_wp = 0
-        try:
-            progress = await asyncio.wait_for(_read_one(drone.mission.mission_progress()), timeout=5.0)
-            if progress:
-                current_wp = progress.current
-                total_wp = progress.total
-        except asyncio.TimeoutError:
-            pass
+        if connector.telemetry:
+            mp = connector.telemetry.get_snapshot()["mission_progress"]
+            current_wp = mp["current"]
+            total_wp = mp["total"]
+        else:
+            try:
+                async def _read_mp(aiter, timeout=5.0):
+                    async for item in aiter:
+                        return item
+                    return None
+                progress = await asyncio.wait_for(_read_mp(drone.mission.mission_progress()), timeout=5.0)
+                if progress:
+                    current_wp = progress.current
+                    total_wp = progress.total
+            except asyncio.TimeoutError:
+                pass
 
         wp_progress = round((current_wp / total_wp) * 100, 1) if total_wp > 0 else 0
         # Only include px4_mission when PX4 actually reports progress (0/0 = mission_raw API mismatch)
