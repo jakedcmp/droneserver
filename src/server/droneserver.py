@@ -1155,7 +1155,23 @@ async def land(ctx: Context, force: bool = False) -> dict:
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
     drone = connector.drone
-    
+
+    # RTL GUARD: Block manual landing when drone is already returning autonomously
+    if not force:
+        current_fm = None
+        if connector.telemetry:
+            fm_obj = connector.telemetry.get("flight_mode")
+            current_fm = str(fm_obj).split(".")[-1] if fm_obj else None
+        if current_fm in ("RETURN_TO_LAUNCH", "LAND"):
+            result = {
+                "status": "blocked",
+                "message": f"Drone is already in {current_fm} mode — landing autonomously. Do not intervene.",
+                "flight_mode": current_fm,
+                "recommendation": "Call get_drone_activity() to monitor landing progress. Use land(force=True) only for emergencies.",
+            }
+            log_tool_output(result)
+            return result
+
     # LANDING GATE: Check if there's a pending destination
     if connector.current_activity and connector.current_activity.destination and not force:
         dest = connector.current_activity.destination
@@ -4813,10 +4829,13 @@ async def monitor_search_progress(ctx: Context) -> dict:
                 await drone.mission_raw.clear_mission()
             except Exception:
                 pass
-            # Mark activity completed if still active
+            # Mark activity returning or completed based on flight mode
             if connector.current_activity and connector.current_activity.status == "active":
-                connector.current_activity.status = "completed"
-                connector.current_activity.completed_at = time.time()
+                if flight_mode and flight_mode.upper() in ("RETURN_TO_LAUNCH", "LAND"):
+                    connector.current_activity.status = "returning"
+                else:
+                    connector.current_activity.status = "completed"
+                    connector.current_activity.completed_at = time.time()
 
         state = mission.to_dict()
         result = {
@@ -5447,6 +5466,10 @@ async def get_drone_activity(ctx: Context) -> dict:
     Returns activity status, telemetry (position, battery, speed, flight mode),
     navigation progress, and mission state (if a search is active).
 
+    Activity status lifecycle: active → returning (RTL/LAND) → completed (on ground).
+    When activity_returning is true, the drone is landing autonomously — do NOT call land().
+    Only activity_complete=true means the flight is fully finished.
+
     Call this repeatedly (every 1-2s) to monitor any flight in progress.
     Uses cached telemetry streams — response time is <100ms.
     """
@@ -5531,19 +5554,31 @@ async def get_drone_activity(ctx: Context) -> dict:
     activity = connector.current_activity
 
     # --- Activity completion detection ---
-    # For waypoint/orbit/search missions, PX4 transitions to HOLD/RTL/LAND
-    # when the mission completes. Auto-mark the activity as completed.
-    if (activity
-        and activity.status == "active"
-        and activity.type in ("waypoint_route", "orbit", "search")
-        and flight_mode in ("HOLD", "RETURN_TO_LAUNCH", "LAND")):
-        activity.status = "completed"
-        activity.completed_at = time.time()
-        # Clear mission_raw to fix re-arm bug
-        try:
-            await drone.mission_raw.clear_mission()
-        except Exception:
-            pass
+    # Status lifecycle: active → returning (RTL/LAND in progress) → completed (on ground)
+    #                   active → completed (HOLD — pattern done, hovering, Claude decides next)
+    if activity and activity.type in ("waypoint_route", "orbit", "search"):
+        if (activity.status == "active"
+                and flight_mode in ("RETURN_TO_LAUNCH", "LAND")):
+            # Drone is actively returning — don't mark completed yet
+            activity.status = "returning"
+            # Clear mission_raw to fix re-arm bug
+            try:
+                await drone.mission_raw.clear_mission()
+            except Exception:
+                pass
+        elif (activity.status == "active"
+                and flight_mode == "HOLD"):
+            # Pattern done, drone hovering at last waypoint — Claude can decide what to do
+            activity.status = "completed"
+            activity.completed_at = time.time()
+            try:
+                await drone.mission_raw.clear_mission()
+            except Exception:
+                pass
+        elif activity.status == "returning" and is_on_ground:
+            # RTL/landing finished — now truly complete
+            activity.status = "completed"
+            activity.completed_at = time.time()
 
     # --- Build response ---
     response = {"status": "success", "telemetry": telemetry}
@@ -5572,6 +5607,7 @@ async def get_drone_activity(ctx: Context) -> dict:
         "total_distance_m": round(activity.total_distance_m, 1),
     }
     response["activity_complete"] = activity.status == "completed"
+    response["activity_returning"] = activity.status == "returning"
 
     # --- Navigation (goto only) ---
     if activity.type == "goto" and activity.destination and telemetry.get("position"):
@@ -5670,8 +5706,11 @@ async def get_drone_activity(ctx: Context) -> dict:
     if activity.status == "completed" and is_on_ground:
         display = f"LANDED: {activity.description} | {elapsed:.0f}s elapsed"
         response["mission_complete"] = True
+    elif activity.status == "returning":
+        display = f"RETURNING: {activity.description} | Auto-landing in progress — do not intervene"
+        response["mission_complete"] = False
     elif activity.status == "completed":
-        display = f"COMPLETED (RTL in progress): {activity.description} | {elapsed:.0f}s elapsed"
+        display = f"COMPLETED: {activity.description} | {elapsed:.0f}s elapsed"
         response["mission_complete"] = False
     else:
         response["mission_complete"] = False
