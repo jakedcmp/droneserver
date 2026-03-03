@@ -1025,7 +1025,7 @@ async def land(ctx: Context, force: bool = False) -> dict:
                         "latitude": dest_lat,
                         "longitude": dest_lon
                     },
-                    "recommendation": "Call monitor_flight() to check progress, or use land(force=True) for emergency landing",
+                    "recommendation": "Call get_drone_activity() to check progress, or use land(force=True) for emergency landing",
                     "safe_to_land": False
                 }
                 log_tool_output(result)
@@ -1061,7 +1061,7 @@ async def land(ctx: Context, force: bool = False) -> dict:
     result = {
         "status": "success", 
         "message": "Landing initiated",
-        "next_step": "Call monitor_flight() until mission_complete is true"
+        "next_step": "Call get_drone_activity() until mission_complete is true"
     }
     log_tool_output(result)
     return result
@@ -1904,7 +1904,7 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
     Fly to an absolute GPS location. Returns immediately - drone flies autonomously.
     
     AFTER CALLING THIS, YOU MUST:
-    1. Call monitor_flight() repeatedly
+    1. Call get_drone_activity() repeatedly
     2. PRINT the DISPLAY_TO_USER value to the user after each monitor_flight() call
     3. When status is "arrived", call land()
     4. Continue calling monitor_flight() until mission_complete is true
@@ -1986,7 +1986,7 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
         
         result = {
             "status": "success", 
-            "message": "Navigation started. Call monitor_flight() to track progress.",
+            "message": "Navigation started. Call get_drone_activity() to track progress.",
             "initial_distance_m": round(initial_distance, 1),
             "estimated_flight_time_seconds": round(eta_seconds, 0),
             "target": {
@@ -1996,7 +1996,7 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
                 "altitude_agl": round(relative_alt, 1),
                 "yaw": yaw_deg if not math.isnan(yaw_deg) else "maintain current"
             },
-            "next_step": "Call monitor_flight() repeatedly until mission_complete is true"
+            "next_step": "Call get_drone_activity() repeatedly until mission_complete is true"
         }
         log_tool_output(result)
         return result
@@ -4170,7 +4170,7 @@ async def execute_grid_search(
             "pattern": "boustrophedon (lawnmower)",
             "altitude_m": altitude,
             "spacing_m": spacing,
-            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
+            "note": "Use get_drone_activity() to track progress. monitor_search_progress() also available for sector details.",
         }
         log_tool_output(result)
         return result
@@ -4309,7 +4309,7 @@ async def execute_expanding_square(
             "sector_count": len(sectors),
             "pattern": "expanding_square (SAR standard)",
             "altitude_m": altitude,
-            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
+            "note": "Use get_drone_activity() to track progress. monitor_search_progress() also available for sector details.",
         }
         log_tool_output(result)
         return result
@@ -4448,7 +4448,7 @@ async def execute_sector_search(
             "pattern": "sector_search (pie-slice)",
             "altitude_m": altitude,
             "radius_m": radius,
-            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
+            "note": "Use get_drone_activity() to track progress. monitor_search_progress() also available for sector details.",
         }
         log_tool_output(result)
         return result
@@ -4525,7 +4525,7 @@ async def monitor_search_progress(ctx: Context) -> dict:
         try:
             bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
             if bat:
-                battery_pct = round(bat.remaining_percent * 100, 1)
+                battery_pct = round(bat.remaining_percent, 1)
         except (asyncio.TimeoutError, Exception):
             pass
 
@@ -4634,6 +4634,15 @@ async def monitor_search_progress(ctx: Context) -> dict:
         all_done = all(s.status == SectorStatus.COMPLETED for s in mission.sectors) if mission.sectors else False
         if all_done:
             mission.status = MissionStatus.COMPLETED
+            # Clear mission_raw to fix re-arm bug (proactive — don't wait for get_drone_activity)
+            try:
+                await drone.mission_raw.clear_mission()
+            except Exception:
+                pass
+            # Mark activity completed if still active
+            if connector.current_activity and connector.current_activity.status == "active":
+                connector.current_activity.status = "completed"
+                connector.current_activity.completed_at = time.time()
 
         state = mission.to_dict()
         result = {
@@ -5300,9 +5309,9 @@ async def get_drone_activity(ctx: Context) -> dict:
 
     try:
         bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
-        telemetry["battery_pct"] = round(bat.remaining_percent * 100, 1) if bat else None
+        telemetry["battery_pct"] = round(bat.remaining_percent, 1) if bat else -1
     except asyncio.TimeoutError:
-        telemetry["battery_pct"] = None
+        telemetry["battery_pct"] = -1  # Timeout — battery telemetry unavailable
 
     try:
         vel = await asyncio.wait_for(_read_one(drone.telemetry.velocity_ned()), timeout=5.0)
@@ -5313,6 +5322,18 @@ async def get_drone_activity(ctx: Context) -> dict:
             telemetry["speed_m_s"] = None
     except asyncio.TimeoutError:
         telemetry["speed_m_s"] = None
+
+    # --- Landing state detection ---
+    landed_state = "UNKNOWN"
+    is_on_ground = False
+    try:
+        ls = await asyncio.wait_for(_read_one(drone.telemetry.landed_state()), timeout=5.0)
+        landed_state = str(ls).split(".")[-1] if ls else "UNKNOWN"
+        is_on_ground = landed_state == "ON_GROUND"
+    except asyncio.TimeoutError:
+        pass
+    telemetry["landed_state"] = landed_state
+    telemetry["is_on_ground"] = is_on_ground
 
     activity = connector.current_activity
 
@@ -5392,15 +5413,24 @@ async def get_drone_activity(ctx: Context) -> dict:
             pass
 
         wp_progress = round((current_wp / total_wp) * 100, 1) if total_wp > 0 else 0
-        response["px4_mission"] = {
-            "current_waypoint": current_wp,
-            "total_waypoints": total_wp,
-            "progress_pct": wp_progress,
-        }
+        # Only include px4_mission when PX4 actually reports progress (0/0 = mission_raw API mismatch)
+        if total_wp > 0:
+            response["px4_mission"] = {
+                "current_waypoint": current_wp,
+                "total_waypoints": total_wp,
+                "progress_pct": wp_progress,
+            }
+        else:
+            response["px4_mission"] = None
 
         if not response.get("navigation"):
             pos = telemetry.get("position", {})
-            display = f"{activity.type.upper()}: wp {current_wp}/{total_wp} ({wp_progress:.0f}%) | Alt: {pos.get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+            # Use elapsed time / estimated time for progress when PX4 waypoint index unavailable
+            if activity.estimated_time_s > 0:
+                time_progress = min(100, round((elapsed / activity.estimated_time_s) * 100, 1))
+                display = f"{activity.type.upper()}: ~{time_progress:.0f}% (est) | {elapsed:.0f}s / {activity.estimated_time_s:.0f}s | Alt: {pos.get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+            else:
+                display = f"{activity.type.upper()}: {elapsed:.0f}s elapsed | Alt: {pos.get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
     else:
         response["px4_mission"] = None
 
@@ -5427,13 +5457,22 @@ async def get_drone_activity(ctx: Context) -> dict:
         response["mission"] = None
 
     # --- RTL / Landing display ---
-    if activity.type == "rtl":
+    if activity.type == "rtl" and not is_on_ground:
         display = f"RTL: Returning to launch | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
     elif activity.type == "land" or activity.landing_initiated:
-        display = f"LANDING | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m"
+        if is_on_ground:
+            display = f"LANDED | Mission complete"
+        else:
+            display = f"LANDING | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m"
 
-    if activity.status == "completed":
-        display = f"COMPLETED: {activity.description} | {elapsed:.0f}s elapsed"
+    if activity.status == "completed" and is_on_ground:
+        display = f"LANDED: {activity.description} | {elapsed:.0f}s elapsed"
+        response["mission_complete"] = True
+    elif activity.status == "completed":
+        display = f"COMPLETED (RTL in progress): {activity.description} | {elapsed:.0f}s elapsed"
+        response["mission_complete"] = False
+    else:
+        response["mission_complete"] = False
 
     response["DISPLAY_TO_USER"] = display
 
