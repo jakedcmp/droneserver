@@ -535,13 +535,35 @@ def generate_sector_search_waypoints(
 
 
 @dataclass
+class FlightActivity:
+    """Always-on flight tracker. Created by every flight action."""
+    id: str                                    # "flight-{uuid8}"
+    type: str                                  # "goto" | "waypoint_route" | "orbit" | "search" | "rtl" | "land" | "idle"
+    status: str                                # "active" | "completed" | "aborted"
+    started_at: float
+    completed_at: float | None = None
+    description: str = ""                      # Human-readable: "Grid search: 12 passes over solar farm"
+    command_tool: str = ""                     # MCP tool name that started this
+    # Navigation (goto)
+    destination: dict | None = None            # {lat, lon, alt_msl, initial_distance_m}
+    # Waypoint missions (route, orbit, search)
+    waypoint_count: int = 0
+    total_distance_m: float = 0.0
+    estimated_time_s: float = 0.0
+    speed_m_s: float = 0.0
+    altitude_m: float = 0.0
+    # Landing state machine (migrated from landing_in_progress bool)
+    landing_initiated: bool = False
+    # Link to mission intelligence
+    mission_id: str | None = None
+
+
+@dataclass
 class MAVLinkConnector:
     drone: System
     connection_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    # Track pending navigation destination for landing gate safety
-    pending_destination: dict | None = field(default=None)
-    # Track if landing has been initiated (to properly monitor landing progress)
-    landing_in_progress: bool = field(default=False)
+    # Unified flight activity tracker (Phase 2E)
+    current_activity: FlightActivity | None = field(default=None)
     # Mission state for Phase 2 mission intelligence
     current_mission: MissionState | None = field(default=None)
     # Background battery monitor task
@@ -971,8 +993,8 @@ async def land(ctx: Context, force: bool = False) -> dict:
     drone = connector.drone
     
     # LANDING GATE: Check if there's a pending destination
-    if connector.pending_destination and not force:
-        dest = connector.pending_destination
+    if connector.current_activity and connector.current_activity.destination and not force:
+        dest = connector.current_activity.destination
         dest_lat = dest["latitude"]
         dest_lon = dest["longitude"]
         
@@ -1011,16 +1033,27 @@ async def land(ctx: Context, force: bool = False) -> dict:
             else:
                 # Close enough - clear destination and proceed with landing
                 logger.info(f"Landing gate passed - {distance:.1f}m from destination (within {landing_gate_threshold}m threshold)")
-                connector.pending_destination = None
-                
+                if connector.current_activity:
+                    connector.current_activity.destination = None
+
         except Exception as e:
             logger.warning(f"Could not check position for landing gate: {e}")
             # Proceed with landing if we can't check position
-    
-    # Clear any pending destination since we're landing
-    connector.pending_destination = None
-    # Set landing flag so monitor_flight knows we're descending
-    connector.landing_in_progress = True
+
+    # Update activity for landing
+    if connector.current_activity:
+        connector.current_activity.destination = None
+        connector.current_activity.landing_initiated = True
+    else:
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="land",
+            status="active",
+            started_at=time.time(),
+            command_tool="land",
+            description="Landing",
+            landing_initiated=True,
+        )
     
     log_mavlink_cmd("drone.action.land")
     await drone.action.land()
@@ -1400,6 +1433,16 @@ async def return_to_launch(ctx: Context) -> dict:
     try:
         log_mavlink_cmd("drone.action.return_to_launch")
         await drone.action.return_to_launch()
+
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="rtl",
+            status="active",
+            started_at=time.time(),
+            command_tool="return_to_launch",
+            description="Returning to launch",
+        )
+
         return {"status": "success", "message": "Return to Launch initiated - drone returning home"}
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - RTL failed: {e}{LogColors.RESET}")
@@ -1834,7 +1877,18 @@ async def clear_mission(ctx: Context) -> dict:
     try:
         log_mavlink_cmd("drone.mission.clear_mission")
         await drone.mission.clear_mission()
-        return {"status": "success", "message": "Mission cleared - all waypoints removed"}
+
+        # Also clear mission_raw (fixes re-arm after mission_raw missions)
+        try:
+            await drone.mission_raw.clear_mission()
+        except Exception:
+            pass
+
+        # Reset Python-side state
+        connector.current_activity = None
+        connector.current_mission = None
+
+        return {"status": "success", "message": "Mission cleared - all waypoints and tracking state reset"}
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to clear mission: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Mission clear failed: {str(e)}"}
@@ -1910,14 +1964,25 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
                        alt=f"{absolute_altitude_m:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
         await drone.action.goto_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg)
         
-        # Register pending destination for landing gate safety
-        connector.pending_destination = {
-            "latitude": latitude_deg,
-            "longitude": longitude_deg,
-            "altitude_msl": absolute_altitude_m,
-            "initial_distance": initial_distance,
-            "start_time": asyncio.get_event_loop().time()
-        }
+        # Create FlightActivity for unified tracking
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="goto",
+            status="active",
+            started_at=time.time(),
+            command_tool="go_to_location",
+            description=f"Flying to ({latitude_deg:.5f}, {longitude_deg:.5f}) at {relative_alt:.0f}m AGL",
+            destination={
+                "latitude": latitude_deg,
+                "longitude": longitude_deg,
+                "altitude_msl": absolute_altitude_m,
+                "initial_distance": initial_distance,
+                "start_time": asyncio.get_event_loop().time(),
+            },
+            altitude_m=relative_alt,
+            total_distance_m=initial_distance,
+            estimated_time_s=eta_seconds,
+        )
         
         result = {
             "status": "success", 
@@ -2091,9 +2156,11 @@ async def monitor_flight(ctx: Context, arrival_threshold_m: float = 20.0, auto_l
             logger.info(f"{LogColors.SUCCESS}✅ MISSION COMPLETE - Drone has landed!{LogColors.RESET}")
             get_flight_logger().log_entry("LANDED", "Mission complete")
             
-            # Clear all tracking state
-            connector.pending_destination = None
-            connector.landing_in_progress = False
+            # Mark activity completed
+            if connector.current_activity:
+                connector.current_activity.status = "completed"
+                connector.current_activity.completed_at = time.time()
+                connector.current_activity.landing_initiated = False
             
             result = {
                 "DISPLAY_TO_USER": "✅ MISSION COMPLETE - Drone has landed safely!",
@@ -2120,9 +2187,9 @@ async def monitor_flight(ctx: Context, arrival_threshold_m: float = 20.0, auto_l
             return result
         
         # Check if there's a pending destination (still navigating)
-        if not connector.pending_destination:
+        if not (connector.current_activity and connector.current_activity.destination):
             # Check if we initiated landing (auto_land or manual land call)
-            if connector.landing_in_progress:
+            if connector.current_activity and connector.current_activity.landing_initiated:
                 logger.info(f"🛬 Landing in progress (flag set)... altitude: {current_alt:.1f}m")
                 result = {
                     "DISPLAY_TO_USER": f"🛬 LANDING | Alt: {current_alt:.1f}m | Descending...",
@@ -2145,8 +2212,8 @@ async def monitor_flight(ctx: Context, arrival_threshold_m: float = 20.0, auto_l
             log_tool_output(result)
             return result
         
-        # Get destination from pending navigation
-        dest = connector.pending_destination
+        # Get destination from current activity
+        dest = connector.current_activity.destination
         dest_lat = dest["latitude"]
         dest_lon = dest["longitude"]
         initial_distance = dest["initial_distance"]
@@ -2196,16 +2263,18 @@ async def monitor_flight(ctx: Context, arrival_threshold_m: float = 20.0, auto_l
                 logger.info(f"{LogColors.SUCCESS}✅ ARRIVED at destination! Distance: {distance:.1f}m{LogColors.RESET}")
                 get_flight_logger().log_entry("ARRIVED", f"Distance: {distance:.1f}m")
                 
-                # Clear pending destination
-                connector.pending_destination = None
-                
+                # Clear destination on activity
+                if connector.current_activity:
+                    connector.current_activity.destination = None
+
                 total_flight_time = asyncio.get_event_loop().time() - start_time
-                
+
                 if auto_land:
                     # Automatically initiate landing and WAIT for it to complete
                     logger.info(f"{LogColors.MAVLINK}🛬 Auto-landing initiated - waiting for touchdown{LogColors.RESET}")
                     get_flight_logger().log_entry("AUTO_LAND", "Landing initiated automatically")
-                    connector.landing_in_progress = True
+                    if connector.current_activity:
+                        connector.current_activity.landing_initiated = True
                     await drone.action.land()
                     
                     # Wait for landing to complete (up to 120 seconds)
@@ -2244,8 +2313,11 @@ async def monitor_flight(ctx: Context, arrival_threshold_m: float = 20.0, auto_l
                             
                             landed_state_str = str(landed_state).split(".")[-1]
                             if landed_state_str == "ON_GROUND" and not is_in_air:
-                                # Confirmed landed!
-                                connector.landing_in_progress = False
+                                # Confirmed landed! Mark activity completed
+                                if connector.current_activity:
+                                    connector.current_activity.status = "completed"
+                                    connector.current_activity.completed_at = time.time()
+                                    connector.current_activity.landing_initiated = False
                                 total_flight_time = asyncio.get_event_loop().time() - start_time
                                 
                                 logger.info(f"{LogColors.SUCCESS}✅ LANDED! Flight complete.{LogColors.RESET}")
@@ -4076,6 +4148,18 @@ async def execute_grid_search(
             sectors[0].status = SectorStatus.ACTIVE
             sectors[0].started_at = time.time()
 
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="search",
+            status="active",
+            started_at=time.time(),
+            command_tool="execute_grid_search",
+            description=f"Grid search: {len(sectors)} passes, {altitude}m alt, {spacing}m spacing",
+            waypoint_count=len(waypoints),
+            altitude_m=altitude,
+            mission_id=mission_id,
+        )
+
         result = {
             "status": "success",
             "message": f"Grid search started: {len(waypoints)} waypoints, {len(sectors)} passes",
@@ -4086,7 +4170,7 @@ async def execute_grid_search(
             "pattern": "boustrophedon (lawnmower)",
             "altitude_m": altitude,
             "spacing_m": spacing,
-            "note": "Use monitor_search_progress() to track sector completion",
+            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
         }
         log_tool_output(result)
         return result
@@ -4204,6 +4288,18 @@ async def execute_expanding_square(
             sectors[0].status = SectorStatus.ACTIVE
             sectors[0].started_at = time.time()
 
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="search",
+            status="active",
+            started_at=time.time(),
+            command_tool="execute_expanding_square",
+            description=f"Expanding square: {len(sectors)} legs, {altitude}m alt",
+            waypoint_count=len(waypoints),
+            altitude_m=altitude,
+            mission_id=mission_id,
+        )
+
         result = {
             "status": "success",
             "message": f"Expanding square started: {len(waypoints)} waypoints, {len(sectors)} legs",
@@ -4213,7 +4309,7 @@ async def execute_expanding_square(
             "sector_count": len(sectors),
             "pattern": "expanding_square (SAR standard)",
             "altitude_m": altitude,
-            "note": "Use monitor_search_progress() to track leg completion",
+            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
         }
         log_tool_output(result)
         return result
@@ -4330,6 +4426,18 @@ async def execute_sector_search(
             sectors[0].status = SectorStatus.ACTIVE
             sectors[0].started_at = time.time()
 
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="search",
+            status="active",
+            started_at=time.time(),
+            command_tool="execute_sector_search",
+            description=f"Sector search: {len(sectors)} sectors, {altitude}m alt, {radius}m radius",
+            waypoint_count=len(waypoints),
+            altitude_m=altitude,
+            mission_id=mission_id,
+        )
+
         result = {
             "status": "success",
             "message": f"Sector search started: {len(waypoints)} waypoints, {len(sectors)} sectors",
@@ -4340,7 +4448,7 @@ async def execute_sector_search(
             "pattern": "sector_search (pie-slice)",
             "altitude_m": altitude,
             "radius_m": radius,
-            "note": "Use monitor_search_progress() to track sector completion",
+            "note": "Use monitor_search_progress() or get_drone_activity() to track progress",
         }
         log_tool_output(result)
         return result
@@ -4811,6 +4919,20 @@ async def fly_waypoint_route(
         log_mavlink_cmd("drone.mission.start_mission")
         await drone.mission.start_mission()
 
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="waypoint_route",
+            status="active",
+            started_at=time.time(),
+            command_tool="fly_waypoint_route",
+            description=f"Waypoint route: {len(waypoints)} waypoints at {altitude}m",
+            waypoint_count=len(waypoints),
+            total_distance_m=total_dist,
+            estimated_time_s=total_dist / speed if speed > 0 else 0,
+            speed_m_s=speed,
+            altitude_m=altitude,
+        )
+
         result = {
             "status": "success",
             "message": f"Route started: {len(waypoints)} waypoints at {altitude}m, speed {speed} m/s",
@@ -4819,6 +4941,7 @@ async def fly_waypoint_route(
             "estimated_time_s": round(total_dist / speed, 1) if speed > 0 else None,
             "altitude_m": altitude,
             "speed_m_s": speed,
+            "note": "Use get_drone_activity() to track progress",
         }
         log_tool_output(result)
         return result
@@ -4929,6 +5052,20 @@ async def orbit_point(
         circumference = 2 * math.pi * radius
         total_dist = circumference * laps
 
+        connector.current_activity = FlightActivity(
+            id=f"flight-{uuid.uuid4().hex[:8]}",
+            type="orbit",
+            status="active",
+            started_at=time.time(),
+            command_tool="orbit_point",
+            description=f"Orbiting ({lat:.5f}, {lon:.5f}) r={radius}m, {laps} lap(s)",
+            waypoint_count=len(mission_items) - 2,
+            total_distance_m=total_dist,
+            estimated_time_s=total_dist / speed if speed > 0 else 0,
+            speed_m_s=speed,
+            altitude_m=altitude,
+        )
+
         result = {
             "status": "success",
             "message": f"Orbiting ({lat:.5f}, {lon:.5f}) at {radius}m radius, {laps} lap(s)",
@@ -4937,9 +5074,10 @@ async def orbit_point(
             "laps": laps,
             "altitude_m": altitude,
             "speed_m_s": speed,
-            "waypoint_count": len(mission_items) - 2,  # exclude speed + RTL items
+            "waypoint_count": len(mission_items) - 2,
             "total_distance_m": round(total_dist, 1),
             "estimated_time_s": round(total_dist / speed, 1) if speed > 0 else None,
+            "note": "Use get_drone_activity() to track progress",
         }
         log_tool_output(result)
         return result
@@ -5110,6 +5248,197 @@ async def return_to_launch_if_low_battery(ctx: Context, threshold: float = 20.0)
     }
     log_tool_output(result)
     return result
+
+
+@mcp.tool()
+async def get_drone_activity(ctx: Context) -> dict:
+    """Get unified snapshot of current drone activity, telemetry, and mission state.
+
+    Works for ALL flight types: goto, waypoint route, orbit, search patterns,
+    RTL, landing, and idle. Single tool replaces the need to call different
+    monitors for different flight modes.
+
+    Returns activity status, telemetry (position, battery, speed, flight mode),
+    navigation progress, and mission state (if a search is active).
+
+    Call this repeatedly (every 5-10s) to monitor any flight in progress.
+    """
+    log_tool_call("get_drone_activity")
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    drone = connector.drone
+
+    async def _read_one(aiter, timeout=5.0):
+        async for item in aiter:
+            return item
+        return None
+
+    # --- Telemetry (always present) ---
+    telemetry = {}
+    try:
+        pos = await asyncio.wait_for(_read_one(drone.telemetry.position()), timeout=5.0)
+        if pos:
+            telemetry["position"] = {
+                "lat": round(pos.latitude_deg, 7),
+                "lon": round(pos.longitude_deg, 7),
+                "alt_relative_m": round(pos.relative_altitude_m, 1),
+                "alt_msl_m": round(pos.absolute_altitude_m, 1),
+            }
+    except asyncio.TimeoutError:
+        telemetry["position"] = None
+
+    try:
+        fm = await asyncio.wait_for(_read_one(drone.telemetry.flight_mode()), timeout=5.0)
+        flight_mode = str(fm).split(".")[-1] if fm else "UNKNOWN"
+        telemetry["flight_mode"] = flight_mode
+    except asyncio.TimeoutError:
+        flight_mode = "UNKNOWN"
+        telemetry["flight_mode"] = flight_mode
+
+    try:
+        bat = await asyncio.wait_for(_read_one(drone.telemetry.battery()), timeout=5.0)
+        telemetry["battery_pct"] = round(bat.remaining_percent * 100, 1) if bat else None
+    except asyncio.TimeoutError:
+        telemetry["battery_pct"] = None
+
+    try:
+        vel = await asyncio.wait_for(_read_one(drone.telemetry.velocity_ned()), timeout=5.0)
+        if vel:
+            speed = math.sqrt(vel.north_m_s**2 + vel.east_m_s**2)
+            telemetry["speed_m_s"] = round(speed, 1)
+        else:
+            telemetry["speed_m_s"] = None
+    except asyncio.TimeoutError:
+        telemetry["speed_m_s"] = None
+
+    activity = connector.current_activity
+
+    # --- Activity completion detection ---
+    # For waypoint/orbit/search missions, PX4 transitions to HOLD/RTL/LAND
+    # when the mission completes. Auto-mark the activity as completed.
+    if (activity
+        and activity.status == "active"
+        and activity.type in ("waypoint_route", "orbit", "search")
+        and flight_mode in ("HOLD", "RETURN_TO_LAUNCH", "LAND")):
+        activity.status = "completed"
+        activity.completed_at = time.time()
+        # Clear mission_raw to fix re-arm bug
+        try:
+            await drone.mission_raw.clear_mission()
+        except Exception:
+            pass
+
+    # --- Build response ---
+    response = {"status": "success", "telemetry": telemetry}
+
+    if not activity:
+        response["activity"] = None
+        response["activity_complete"] = True
+        display = f"IDLE | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+        response["DISPLAY_TO_USER"] = display
+        log_tool_output(response)
+        return response
+
+    elapsed = round(time.time() - activity.started_at, 1)
+
+    display = f"{activity.type.upper()}: {activity.description} | {elapsed:.0f}s elapsed"
+
+    response["activity"] = {
+        "id": activity.id,
+        "type": activity.type,
+        "status": activity.status,
+        "description": activity.description,
+        "command_tool": activity.command_tool,
+        "started_at": activity.started_at,
+        "elapsed_s": elapsed,
+        "waypoint_count": activity.waypoint_count,
+        "total_distance_m": round(activity.total_distance_m, 1),
+    }
+    response["activity_complete"] = activity.status == "completed"
+
+    # --- Navigation (goto only) ---
+    if activity.type == "goto" and activity.destination and telemetry.get("position"):
+        dest = activity.destination
+        pos = telemetry["position"]
+        distance = haversine_distance(pos["lat"], pos["lon"], dest["latitude"], dest["longitude"])
+        initial = dest.get("initial_distance", 1)
+        progress = max(0, min(100, ((initial - distance) / initial) * 100)) if initial > 0 else 100
+        speed_val = telemetry.get("speed_m_s") or 0
+        eta = distance / speed_val if speed_val > 0.5 else None
+
+        response["navigation"] = {
+            "destination": {"lat": dest["latitude"], "lon": dest["longitude"]},
+            "distance_remaining_m": round(distance, 1),
+            "progress_pct": round(progress, 1),
+            "eta_s": round(eta, 0) if eta else None,
+        }
+        display = f"GOTO: {progress:.0f}% | {distance:.0f}m remain | Alt: {pos.get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+    else:
+        response["navigation"] = None
+
+    # --- PX4 mission progress (waypoint/orbit/search) ---
+    if activity.type in ("waypoint_route", "orbit", "search"):
+        current_wp = 0
+        total_wp = 0
+        try:
+            progress = await asyncio.wait_for(_read_one(drone.mission.mission_progress()), timeout=5.0)
+            if progress:
+                current_wp = progress.current
+                total_wp = progress.total
+        except asyncio.TimeoutError:
+            pass
+
+        wp_progress = round((current_wp / total_wp) * 100, 1) if total_wp > 0 else 0
+        response["px4_mission"] = {
+            "current_waypoint": current_wp,
+            "total_waypoints": total_wp,
+            "progress_pct": wp_progress,
+        }
+
+        if not response.get("navigation"):
+            pos = telemetry.get("position", {})
+            display = f"{activity.type.upper()}: wp {current_wp}/{total_wp} ({wp_progress:.0f}%) | Alt: {pos.get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+    else:
+        response["px4_mission"] = None
+
+    # --- Mission state (search only) ---
+    if connector.current_mission and activity.mission_id:
+        mission = connector.current_mission
+        sectors_completed = sum(1 for s in mission.sectors if s.status == SectorStatus.COMPLETED)
+        sectors_total = len(mission.sectors)
+        coverage = round((sectors_completed / sectors_total) * 100, 1) if sectors_total > 0 else 0
+        active_sectors = [s for s in mission.sectors if s.status == SectorStatus.ACTIVE]
+
+        response["mission"] = {
+            "id": mission.id,
+            "type": mission.type,
+            "objective": mission.objective,
+            "sectors_completed": sectors_completed,
+            "sectors_total": sectors_total,
+            "coverage_pct": coverage,
+            "current_sector": active_sectors[0].id if active_sectors else None,
+            "findings_count": len(mission.findings),
+        }
+        display = f"SEARCH: {sectors_completed}/{sectors_total} sectors ({coverage:.0f}%) | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+    else:
+        response["mission"] = None
+
+    # --- RTL / Landing display ---
+    if activity.type == "rtl":
+        display = f"RTL: Returning to launch | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m | Batt: {telemetry.get('battery_pct', '?')}%"
+    elif activity.type == "land" or activity.landing_initiated:
+        display = f"LANDING | Alt: {telemetry.get('position', {}).get('alt_relative_m', '?')}m"
+
+    if activity.status == "completed":
+        display = f"COMPLETED: {activity.description} | {elapsed:.0f}s elapsed"
+
+    response["DISPLAY_TO_USER"] = display
+
+    log_tool_output(response)
+    return response
 
 
 if __name__ == "__main__":
