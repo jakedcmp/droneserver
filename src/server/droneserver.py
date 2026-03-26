@@ -15,8 +15,36 @@ import math
 import uuid
 import time
 import json
+import base64
+import io
 from dotenv import load_dotenv
 from pathlib import Path
+
+# Optional vision dependencies — graceful degradation if not installed
+try:
+    import cosysairsim as airsim
+    AIRSIM_AVAILABLE = True
+except ImportError:
+    AIRSIM_AVAILABLE = False
+
+try:
+    import numpy as np
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
 
 # Load environment variables from .env file
 env_path = Path(__file__).parent.parent.parent / '.env'
@@ -312,7 +340,123 @@ class MissionState:
 
 
 # Image store for vision pipeline (module-level, persists across requests)
+# Stores metadata + optional PNG bytes. LRU eviction at _IMAGE_STORE_MAX_BYTES.
 _image_store: dict[str, dict] = {}
+_image_store_bytes: int = 0
+_IMAGE_STORE_MAX_BYTES: int = 500 * 1024 * 1024  # 500MB cap
+
+def _image_store_put(image_ref: str, meta: dict):
+    """Add an image to the store with LRU eviction if over budget."""
+    global _image_store_bytes
+    png_size = len(meta.get("png_bytes", b""))
+    # Evict oldest entries if over budget
+    while _image_store_bytes + png_size > _IMAGE_STORE_MAX_BYTES and _image_store:
+        oldest_key = next(iter(_image_store))
+        oldest = _image_store.pop(oldest_key)
+        _image_store_bytes -= len(oldest.get("png_bytes", b""))
+    _image_store[image_ref] = meta
+    _image_store_bytes += png_size
+
+
+# ============================================================
+# YOLO Model Loader (lazy, thread-safe)
+# ============================================================
+_yolo_model = None
+_yolo_lock = asyncio.Lock()
+
+def _get_yolo_model():
+    """Load YOLO model on first call. Model auto-downloads from Ultralytics Hub (~6MB for nano)."""
+    global _yolo_model
+    if _yolo_model is None:
+        model_name = os.environ.get("YOLO_MODEL", "yolo11n.pt")
+        logger.info(f"{LogColors.STATUS}Loading YOLO model: {model_name}{LogColors.RESET}")
+        _yolo_model = YOLO(model_name)
+        logger.info(f"{LogColors.SUCCESS}YOLO model loaded{LogColors.RESET}")
+    return _yolo_model
+
+
+def _run_yolo(png_bytes: bytes, confidence: float = 0.3) -> list[dict]:
+    """Run YOLO inference on PNG bytes. Returns list of detections."""
+    img_array = np.frombuffer(png_bytes, dtype=np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    if img is None:
+        return []
+    model = _get_yolo_model()
+    results = model(img, conf=confidence, verbose=False)
+    detections = []
+    for r in results:
+        for box in r.boxes:
+            detections.append({
+                "class": r.names[int(box.cls[0])],
+                "confidence": round(float(box.conf[0]), 3),
+                "bbox": [round(float(x), 1) for x in box.xyxy[0].tolist()],
+            })
+    return detections
+
+
+# ============================================================
+# Claude Vision Helper (async)
+# ============================================================
+async def _claude_vision_analyze(png_bytes: bytes, prompt: str,
+                                  detections: list[dict],
+                                  position: dict) -> dict:
+    """Send image + context to Claude Vision API for reasoning.
+
+    Returns structured JSON with description, findings, and recommendations.
+    """
+    model = os.environ.get("CLAUDE_VISION_MODEL", "claude-haiku-4-5")
+    client = anthropic.AsyncAnthropic()  # Uses ANTHROPIC_API_KEY env var
+
+    # Build context
+    context_parts = []
+    if position:
+        context_parts.append(f"Drone position: lat={position.get('latitude_deg')}, lon={position.get('longitude_deg')}, alt={position.get('relative_altitude_m')}m")
+    if detections:
+        det_summary = ", ".join(f"{d['class']} ({d['confidence']:.0%})" for d in detections[:10])
+        context_parts.append(f"YOLO detections: {det_summary}")
+
+    system_prompt = (
+        "You are analyzing aerial drone imagery for a search/survey mission. "
+        "Respond with JSON only. Schema: "
+        '{"description": "...", "findings": [{"type": "...", "description": "...", '
+        '"confidence": 0.0-1.0, "severity": "low|medium|high|critical"}], '
+        '"recommendation": "..."}'
+    )
+
+    user_content = []
+    # Add image
+    img_b64 = base64.b64encode(png_bytes).decode("utf-8")
+    user_content.append({
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+    })
+    # Add text prompt
+    text = "\n".join(context_parts)
+    if prompt:
+        text += f"\n\nUser request: {prompt}"
+    else:
+        text += "\n\nDescribe what you see and flag any anomalies or objects of interest."
+    user_content.append({"type": "text", "text": text})
+
+    response = await client.messages.create(
+        model=model,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    # Parse JSON from response
+    response_text = response.content[0].text
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        # Try to extract JSON from markdown code block
+        if "```" in response_text:
+            json_str = response_text.split("```")[1]
+            if json_str.startswith("json"):
+                json_str = json_str[4:]
+            return json.loads(json_str.strip())
+        return {"description": response_text, "findings": [], "recommendation": ""}
 
 
 # ============================================================
@@ -721,6 +865,8 @@ class MAVLinkConnector:
     _battery_monitor_task: asyncio.Task | None = field(default=None)
     # Persistent telemetry cache (TelemetryService)
     telemetry: TelemetryService | None = field(default=None)
+    # AirSim client for vision pipeline (None = synthetic stubs)
+    airsim_client: object | None = field(default=None)
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -824,11 +970,28 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
         drone = System()
         connection_ready = asyncio.Event()
         
+        # Initialize AirSim client if configured
+        airsim_client = None
+        airsim_host = os.environ.get("AIRSIM_HOST", "")
+        airsim_port = int(os.environ.get("AIRSIM_PORT", "41451"))
+        if airsim_host and AIRSIM_AVAILABLE:
+            try:
+                airsim_client = airsim.MultirotorClient(ip=airsim_host, port=airsim_port)
+                airsim_client.confirmConnection()
+                airsim_client.enableApiControl(True)
+                logger.info(f"{LogColors.SUCCESS}✓ AirSim connected at {airsim_host}:{airsim_port}{LogColors.RESET}")
+            except Exception as e:
+                logger.warning(f"{LogColors.YELLOW}⚠ AirSim connection failed ({e}) — falling back to synthetic stubs{LogColors.RESET}")
+                airsim_client = None
+        elif airsim_host and not AIRSIM_AVAILABLE:
+            logger.warning(f"{LogColors.YELLOW}⚠ AIRSIM_HOST set but cosysairsim not installed — synthetic stubs{LogColors.RESET}")
+
         # Create the global connector with TelemetryService
         _global_connector = MAVLinkConnector(
             drone=drone,
             connection_ready=connection_ready,
             telemetry=TelemetryService(drone),
+            airsim_client=airsim_client,
         )
 
         # Start drone connection in background
@@ -4863,85 +5026,331 @@ async def monitor_search_progress(ctx: Context) -> dict:
 # ============================================================
 
 @mcp.tool()
-async def capture_image(ctx: Context, label: str = "") -> dict:
+async def capture_image(ctx: Context, label: str = "", camera_name: str = "front_center",
+                        image_type: str = "scene") -> dict:
     """Capture an image from the drone's camera.
 
-    In headless SITL mode, returns a synthetic image reference with GPS metadata.
-    When Cosys-AirSim is connected (future), will capture an actual frame.
+    When AirSim is connected, captures a real rendered frame.
+    Otherwise returns a synthetic image reference with GPS metadata.
 
     Args:
         ctx: MCP context
         label: Optional label for the image (e.g. "sector-2-start", "anomaly-closeup")
+        camera_name: Camera to use — "front_center" (1920x1080) or "bottom_center" (1280x720)
+        image_type: Type of image — "scene" (RGB), "depth" (depth map), "segmentation"
 
     Returns:
         dict with image_ref, position metadata, and source info
     """
-    log_tool_call("capture_image", label=label)
+    log_tool_call("capture_image", label=label, camera_name=camera_name, image_type=image_type)
     connector = ctx.request_context.lifespan_context
 
     if not await ensure_connection(connector):
         return {"status": "failed", "error": "Drone connection timeout."}
 
-    drone = connector.drone
-
-    # Get current position for metadata
+    # Get position from telemetry cache
     position_data = {}
-    try:
-        async for pos in drone.telemetry.position():
+    if connector.telemetry:
+        snap = connector.telemetry.get_snapshot()
+        if snap.get("position"):
             position_data = {
-                "latitude_deg": pos.latitude_deg,
-                "longitude_deg": pos.longitude_deg,
-                "relative_altitude_m": pos.relative_altitude_m,
-                "absolute_altitude_m": pos.absolute_altitude_m,
+                "latitude_deg": snap["position"]["lat"],
+                "longitude_deg": snap["position"]["lon"],
+                "relative_altitude_m": snap["position"]["alt_relative_m"],
+                "absolute_altitude_m": snap["position"]["alt_msl_m"],
             }
-            break
-    except Exception:
-        pass
 
     # Generate image reference
     mission_id = connector.current_mission.id if connector.current_mission else "no-mission"
     image_ref = f"img-{mission_id}-{uuid.uuid4().hex[:6]}"
 
+    # Map image_type string to AirSim ImageType enum
+    airsim_type_map = {"scene": 0, "depth": 2, "segmentation": 5}
+    airsim_type_int = airsim_type_map.get(image_type, 0)
+
+    png_bytes = b""
+    source = "synthetic"
+    width = 0
+    height = 0
+
+    if connector.airsim_client and AIRSIM_AVAILABLE:
+        try:
+            loop = asyncio.get_event_loop()
+            responses = await loop.run_in_executor(None, lambda: connector.airsim_client.simGetImages([
+                airsim.ImageRequest(camera_name, airsim_type_int, False, False)
+            ]))
+            if responses and len(responses) > 0 and responses[0].width > 0:
+                resp = responses[0]
+                # Convert raw bytes to PNG
+                if CV2_AVAILABLE:
+                    img_1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
+                    img_bgr = img_1d.reshape(resp.height, resp.width, 3)
+                    _, png_buf = cv2.imencode('.png', img_bgr)
+                    png_bytes = png_buf.tobytes()
+                else:
+                    # Fallback: store raw bytes (less efficient but works)
+                    png_bytes = bytes(resp.image_data_uint8)
+                width = resp.width
+                height = resp.height
+                source = "airsim"
+            else:
+                logger.warning(f"{LogColors.YELLOW}AirSim returned empty image for {camera_name}{LogColors.RESET}")
+        except Exception as e:
+            logger.warning(f"{LogColors.YELLOW}AirSim capture failed ({e}) — synthetic fallback{LogColors.RESET}")
+
     image_meta = {
         "image_ref": image_ref,
         "label": label,
+        "camera_name": camera_name,
+        "image_type": image_type,
         "position": position_data,
         "timestamp": time.time(),
-        "source": "synthetic",  # Will be "airsim" when Cosys-AirSim connected
+        "source": source,
         "mission_id": mission_id,
+        "width": width,
+        "height": height,
+        "png_bytes": png_bytes,
     }
 
-    # Store for later retrieval by analyze_image
-    _image_store[image_ref] = image_meta
+    _image_store_put(image_ref, image_meta)
 
     result = {
         "status": "success",
-        **image_meta,
-        "note": "Headless SITL — synthetic image ref. Connect Cosys-AirSim for real camera.",
+        "image_ref": image_ref,
+        "label": label,
+        "camera_name": camera_name,
+        "image_type": image_type,
+        "position": position_data,
+        "source": source,
+        "width": width,
+        "height": height,
+        "png_size_bytes": len(png_bytes),
+        "mission_id": mission_id,
     }
+    if source == "synthetic":
+        result["note"] = "Headless SITL — synthetic image ref. Set AIRSIM_HOST for real camera."
     log_tool_output(result)
     return result
 
 
 @mcp.tool()
-async def analyze_image(ctx: Context, image_ref: str, prompt: str = "", auto_add_finding: bool = False) -> dict:
+async def set_camera_pose(ctx: Context, camera_name: str = "front_center",
+                          pitch_deg: float = 0.0, roll_deg: float = 0.0,
+                          yaw_deg: float = 0.0) -> dict:
+    """Set the camera gimbal orientation.
+
+    Controls the camera angle for directed inspection. Maps to
+    GIMBAL_MANAGER_SET_PITCHYAW on real hardware.
+
+    Args:
+        ctx: MCP context
+        camera_name: Camera to control ("front_center" or "bottom_center")
+        pitch_deg: Pitch angle in degrees (negative = down, -90 = nadir)
+        roll_deg: Roll angle in degrees
+        yaw_deg: Yaw angle in degrees
+
+    Returns:
+        dict with status and new pose
+    """
+    log_tool_call("set_camera_pose", camera_name=camera_name, pitch_deg=pitch_deg,
+                  roll_deg=roll_deg, yaw_deg=yaw_deg)
+    connector = ctx.request_context.lifespan_context
+
+    if connector.airsim_client and AIRSIM_AVAILABLE:
+        try:
+            pose = airsim.Pose(
+                airsim.Vector3r(0, 0, 0),
+                airsim.to_quaternion(
+                    math.radians(pitch_deg),
+                    math.radians(roll_deg),
+                    math.radians(yaw_deg),
+                ),
+            )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: connector.airsim_client.simSetCameraPose(camera_name, pose),
+            )
+            result = {
+                "status": "success",
+                "camera_name": camera_name,
+                "pitch_deg": pitch_deg,
+                "roll_deg": roll_deg,
+                "yaw_deg": yaw_deg,
+            }
+        except Exception as e:
+            result = {"status": "failed", "error": str(e)}
+    else:
+        result = {
+            "status": "success",
+            "camera_name": camera_name,
+            "pitch_deg": pitch_deg,
+            "roll_deg": roll_deg,
+            "yaw_deg": yaw_deg,
+            "note": "No AirSim — pose stored but not applied.",
+        }
+
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def capture_multi_camera(ctx: Context, label: str = "",
+                                cameras: str = "front_center,bottom_center") -> dict:
+    """Capture images from multiple cameras simultaneously.
+
+    Efficient single-RPC multi-camera capture for survey waypoints.
+
+    Args:
+        ctx: MCP context
+        label: Label prefix for images
+        cameras: Comma-separated camera names (default: "front_center,bottom_center")
+
+    Returns:
+        dict with list of image refs from each camera
+    """
+    camera_list = [c.strip() for c in cameras.split(",") if c.strip()]
+    log_tool_call("capture_multi_camera", label=label, cameras=camera_list)
+    connector = ctx.request_context.lifespan_context
+
+    if not await ensure_connection(connector):
+        return {"status": "failed", "error": "Drone connection timeout."}
+
+    # Get position once for all images
+    position_data = {}
+    if connector.telemetry:
+        snap = connector.telemetry.get_snapshot()
+        if snap.get("position"):
+            position_data = {
+                "latitude_deg": snap["position"]["lat"],
+                "longitude_deg": snap["position"]["lon"],
+                "relative_altitude_m": snap["position"]["alt_relative_m"],
+                "absolute_altitude_m": snap["position"]["alt_msl_m"],
+            }
+
+    mission_id = connector.current_mission.id if connector.current_mission else "no-mission"
+    captures = []
+
+    if connector.airsim_client and AIRSIM_AVAILABLE and CV2_AVAILABLE:
+        try:
+            requests = [airsim.ImageRequest(cam, 0, False, False) for cam in camera_list]
+            loop = asyncio.get_event_loop()
+            responses = await loop.run_in_executor(
+                None, lambda: connector.airsim_client.simGetImages(requests)
+            )
+            for i, resp in enumerate(responses):
+                cam = camera_list[i] if i < len(camera_list) else f"camera_{i}"
+                image_ref = f"img-{mission_id}-{uuid.uuid4().hex[:6]}"
+                png_bytes = b""
+                width, height = 0, 0
+                if resp.width > 0:
+                    img_1d = np.frombuffer(resp.image_data_uint8, dtype=np.uint8)
+                    img_bgr = img_1d.reshape(resp.height, resp.width, 3)
+                    _, png_buf = cv2.imencode('.png', img_bgr)
+                    png_bytes = png_buf.tobytes()
+                    width, height = resp.width, resp.height
+
+                meta = {
+                    "image_ref": image_ref, "label": f"{label}-{cam}" if label else cam,
+                    "camera_name": cam, "image_type": "scene", "position": position_data,
+                    "timestamp": time.time(), "source": "airsim", "mission_id": mission_id,
+                    "width": width, "height": height, "png_bytes": png_bytes,
+                }
+                _image_store_put(image_ref, meta)
+                captures.append({"image_ref": image_ref, "camera": cam,
+                                 "width": width, "height": height,
+                                 "png_size_bytes": len(png_bytes)})
+        except Exception as e:
+            logger.warning(f"{LogColors.YELLOW}Multi-camera capture failed ({e}){LogColors.RESET}")
+
+    # Fallback: synthetic refs for any cameras not yet captured
+    for cam in camera_list:
+        if not any(c["camera"] == cam for c in captures):
+            image_ref = f"img-{mission_id}-{uuid.uuid4().hex[:6]}"
+            meta = {
+                "image_ref": image_ref, "label": f"{label}-{cam}" if label else cam,
+                "camera_name": cam, "image_type": "scene", "position": position_data,
+                "timestamp": time.time(), "source": "synthetic", "mission_id": mission_id,
+                "width": 0, "height": 0, "png_bytes": b"",
+            }
+            _image_store_put(image_ref, meta)
+            captures.append({"image_ref": image_ref, "camera": cam,
+                             "width": 0, "height": 0, "source": "synthetic"})
+
+    result = {"status": "success", "captures": captures, "position": position_data}
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def get_camera_info(ctx: Context) -> dict:
+    """List available cameras and their configurations.
+
+    Returns:
+        dict with camera names, types, and resolution info
+    """
+    log_tool_call("get_camera_info")
+    connector = ctx.request_context.lifespan_context
+
+    cameras = {
+        "front_center": {
+            "resolution": "1920x1080",
+            "image_types": ["scene", "depth"],
+            "gimbal": True,
+            "position": "front, slightly below center",
+        },
+        "bottom_center": {
+            "resolution": "1280x720",
+            "image_types": ["scene", "segmentation"],
+            "gimbal": False,
+            "position": "bottom, fixed nadir (-90°)",
+        },
+    }
+
+    airsim_connected = connector.airsim_client is not None
+    result = {
+        "status": "success",
+        "airsim_connected": airsim_connected,
+        "cameras": cameras,
+        "supported_image_types": {
+            "scene": "RGB color image (ImageType 0)",
+            "depth": "Depth map (ImageType 2)",
+            "segmentation": "Segmentation mask (ImageType 5)",
+        },
+    }
+    if not airsim_connected:
+        result["note"] = "AirSim not connected — capture returns synthetic refs"
+
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def analyze_image(ctx: Context, image_ref: str, prompt: str = "",
+                        auto_add_finding: bool = False, yolo_confidence: float = 0.3,
+                        use_claude_vision: bool = True) -> dict:
     """Analyze a captured image for objects, damage, or anomalies.
 
-    In headless SITL mode, returns a mock analysis result.
-    When Cosys-AirSim is connected (future), will:
-    - Run CV models (YOLO/OpenCV) for real-time detection
-    - Send flagged frames to Claude Vision API for deep analysis
+    Three-tier pipeline:
+    1. YOLO v11 detection (always, ~50ms, free) — bounding boxes + class + confidence
+    2. Claude Vision API (on YOLO hit or explicit prompt) — reasoning + severity
+    3. Auto-log findings to mission state
+
+    Falls back to synthetic stub if no real image data available.
 
     Args:
         ctx: MCP context
         image_ref: Reference from capture_image (e.g. "img-mission-abc123-def456")
         prompt: What to look for (e.g. "Check for damaged solar panels")
         auto_add_finding: If True and analysis detects something, auto-log as finding
+        yolo_confidence: Minimum YOLO confidence threshold (default 0.3)
+        use_claude_vision: Whether to use Claude Vision for reasoning (default True)
 
     Returns:
-        dict with analysis results and any detections
+        dict with analysis results, YOLO detections, and optional Claude Vision reasoning
     """
-    log_tool_call("analyze_image", image_ref=image_ref, prompt=prompt, auto_add_finding=auto_add_finding)
+    log_tool_call("analyze_image", image_ref=image_ref, prompt=prompt,
+                  auto_add_finding=auto_add_finding)
     connector = ctx.request_context.lifespan_context
 
     # Look up image metadata
@@ -4951,16 +5360,98 @@ async def analyze_image(ctx: Context, image_ref: str, prompt: str = "", auto_add
         log_tool_output(result)
         return result
 
-    # SITL stub — no real camera available
+    source = image_meta.get("source", "synthetic")
+    png_bytes = image_meta.get("png_bytes", b"")
+    position = image_meta.get("position", {})
+
+    # If no real image data, return stub
+    if source == "synthetic" or not png_bytes:
+        result = {
+            "status": "success",
+            "image_ref": image_ref,
+            "source": source,
+            "position": position,
+            "analysis": "No real image data — synthetic stub.",
+            "yolo_detections": [],
+            "claude_vision": None,
+            "prompt": prompt,
+            "note": "Set AIRSIM_HOST for real vision analysis.",
+        }
+        log_tool_output(result)
+        return result
+
+    yolo_detections = []
+    claude_analysis = None
+
+    # ---- Tier 1: YOLO Detection ----
+    if YOLO_AVAILABLE and CV2_AVAILABLE:
+        try:
+            loop = asyncio.get_event_loop()
+            yolo_detections = await loop.run_in_executor(None, lambda: _run_yolo(png_bytes, yolo_confidence))
+            logger.info(f"{LogColors.STATUS}YOLO: {len(yolo_detections)} detections above {yolo_confidence}{LogColors.RESET}")
+        except Exception as e:
+            logger.warning(f"{LogColors.YELLOW}YOLO failed: {e}{LogColors.RESET}")
+
+    # ---- Tier 2: Claude Vision API ----
+    has_detections = len(yolo_detections) > 0
+    should_use_claude = use_claude_vision and ANTHROPIC_AVAILABLE and os.environ.get("ANTHROPIC_API_KEY")
+    if should_use_claude and (has_detections or prompt):
+        try:
+            claude_analysis = await _claude_vision_analyze(
+                png_bytes=png_bytes,
+                prompt=prompt,
+                detections=yolo_detections,
+                position=position,
+            )
+            logger.info(f"{LogColors.STATUS}Claude Vision: analysis complete{LogColors.RESET}")
+        except Exception as e:
+            logger.warning(f"{LogColors.YELLOW}Claude Vision failed: {e}{LogColors.RESET}")
+
+    # ---- Tier 3: Auto-add findings ----
+    findings_added = []
+    if auto_add_finding and connector.current_mission:
+        # Prefer Claude analysis findings, fall back to YOLO
+        if claude_analysis and claude_analysis.get("findings"):
+            for cf in claude_analysis["findings"]:
+                finding = Finding(
+                    id=f"f-{uuid.uuid4().hex[:6]}",
+                    type=cf.get("type", "detection"),
+                    lat=position.get("latitude_deg", 0.0),
+                    lon=position.get("longitude_deg", 0.0),
+                    confidence=cf.get("confidence", 0.5),
+                    metadata={
+                        "description": cf.get("description", ""),
+                        "severity": cf.get("severity", "unknown"),
+                        "source": "claude_vision",
+                    },
+                    image_ref=image_ref,
+                )
+                connector.current_mission.findings.append(finding)
+                findings_added.append(finding.id)
+        elif yolo_detections:
+            for det in yolo_detections:
+                finding = Finding(
+                    id=f"f-{uuid.uuid4().hex[:6]}",
+                    type=det["class"],
+                    lat=position.get("latitude_deg", 0.0),
+                    lon=position.get("longitude_deg", 0.0),
+                    confidence=det["confidence"],
+                    metadata={"bbox": det["bbox"], "source": "yolo"},
+                    image_ref=image_ref,
+                )
+                connector.current_mission.findings.append(finding)
+                findings_added.append(finding.id)
+
     result = {
         "status": "success",
         "image_ref": image_ref,
-        "source": image_meta.get("source", "synthetic"),
-        "position": image_meta.get("position", {}),
-        "analysis": "Headless SITL — no camera available. Connect Cosys-AirSim for real vision analysis.",
-        "detections": [],
+        "source": source,
+        "position": position,
+        "yolo_detections": yolo_detections,
+        "yolo_count": len(yolo_detections),
+        "claude_vision": claude_analysis,
         "prompt": prompt,
-        "note": "This is a stub. Real analysis requires Cosys-AirSim (Phase 2 vision tier).",
+        "findings_added": findings_added,
     }
     log_tool_output(result)
     return result
@@ -5013,6 +5504,69 @@ async def get_findings_near(ctx: Context, lat: float, lon: float, radius_m: floa
         "radius_m": radius_m,
         "count": len(nearby),
         "findings": nearby,
+    }
+    log_tool_output(result)
+    return result
+
+
+@mcp.tool()
+async def capture_and_analyze(ctx: Context, label: str = "", camera_name: str = "front_center",
+                               prompt: str = "", auto_add_finding: bool = True,
+                               yolo_confidence: float = 0.3,
+                               use_claude_vision: bool = True) -> dict:
+    """Capture an image and immediately analyze it — one-call vision pipeline.
+
+    Combines capture_image + analyze_image for efficient waypoint-based surveying.
+    Default auto_add_finding=True so detections are logged to mission state automatically.
+
+    Args:
+        ctx: MCP context
+        label: Label for the capture (e.g. "sector-3-wp-2")
+        camera_name: Camera to use ("front_center" or "bottom_center")
+        prompt: What to look for (e.g. "Check for damaged solar panels")
+        auto_add_finding: Auto-log detections to mission findings (default True)
+        yolo_confidence: Minimum YOLO confidence threshold (default 0.3)
+        use_claude_vision: Use Claude Vision API for reasoning (default True)
+
+    Returns:
+        dict with capture info + analysis results
+    """
+    log_tool_call("capture_and_analyze", label=label, camera_name=camera_name, prompt=prompt)
+
+    # Step 1: Capture
+    capture_result = await capture_image(ctx, label=label, camera_name=camera_name)
+    if capture_result.get("status") != "success":
+        return capture_result
+
+    image_ref = capture_result["image_ref"]
+
+    # Step 2: Analyze
+    analysis_result = await analyze_image(
+        ctx, image_ref=image_ref, prompt=prompt,
+        auto_add_finding=auto_add_finding,
+        yolo_confidence=yolo_confidence,
+        use_claude_vision=use_claude_vision,
+    )
+
+    # Merge results
+    result = {
+        "status": "success",
+        "capture": {
+            "image_ref": image_ref,
+            "source": capture_result.get("source"),
+            "camera_name": camera_name,
+            "width": capture_result.get("width"),
+            "height": capture_result.get("height"),
+            "png_size_bytes": capture_result.get("png_size_bytes"),
+        },
+        "position": capture_result.get("position", {}),
+        "analysis": {
+            "yolo_detections": analysis_result.get("yolo_detections", []),
+            "yolo_count": analysis_result.get("yolo_count", 0),
+            "claude_vision": analysis_result.get("claude_vision"),
+            "findings_added": analysis_result.get("findings_added", []),
+        },
+        "prompt": prompt,
     }
     log_tool_output(result)
     return result
