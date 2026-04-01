@@ -976,9 +976,15 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
         airsim_port = int(os.environ.get("AIRSIM_PORT", "41451"))
         if airsim_host and AIRSIM_AVAILABLE:
             try:
-                airsim_client = airsim.MultirotorClient(ip=airsim_host, port=airsim_port)
-                airsim_client.confirmConnection()
-                airsim_client.enableApiControl(True)
+                # Run in executor — cosysairsim uses msgpack-rpc/tornado which
+                # conflicts with the running asyncio event loop if called directly
+                loop = asyncio.get_event_loop()
+                def _connect_airsim():
+                    client = airsim.MultirotorClient(ip=airsim_host, port=airsim_port)
+                    client.confirmConnection()
+                    client.enableApiControl(True)
+                    return client
+                airsim_client = await loop.run_in_executor(None, _connect_airsim)
                 logger.info(f"{LogColors.SUCCESS}✓ AirSim connected at {airsim_host}:{airsim_port}{LogColors.RESET}")
             except Exception as e:
                 logger.warning(f"{LogColors.YELLOW}⚠ AirSim connection failed ({e}) — falling back to synthetic stubs{LogColors.RESET}")
