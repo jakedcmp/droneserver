@@ -21,6 +21,10 @@ dependencies = [
     "Pillow>=10.2.0",
     "ultralytics>=8.1.0",
     "anthropic>=0.28.0",
+    # Service infrastructure (perception-service + inter-service comms)
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "httpx>=0.27.0",
 ]
 
 [project.urls]
