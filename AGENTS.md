@@ -5,7 +5,8 @@ MCP server for LLM-to-drone control via MAVLink. Fork of PeterJBurke/droneserver
 ## Architecture
 - `src/server/droneserver.py` — core MCP server (~5900 lines). ~67 tools: flight control, mission state, search patterns, safety, vision proxies
 - `src/server/perception/` — separate FastAPI service for vision pipeline (camera, YOLO, Claude Vision, image store)
-- `src/server/droneserver_http.py` — HTTP/SSE entrypoint for MCP
+- `src/server/droneserver_http.py` — HTTP/SSE entrypoint. Starlette app mounts MCP SSE as sub-app + internal REST/WS API (`/api/telemetry`, `/api/activity`, `/api/mission`, `/api/health`, `WS /ws/telemetry`) for dashboard-api consumption
+- `src/server/perception/app.py` — includes `WS /ws/video/{camera_name}` for JPEG video streaming to dashboard
 
 ## Key Patterns
 - Vision MCP tools proxy to perception-service via httpx (PERCEPTION_URL env var)

@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 """
-MAVLink MCP Server - HTTP/SSE Transport
-For use with ChatGPT Developer Mode and other web-based MCP clients
+MAVLink MCP Server - HTTP/SSE Transport + Internal API
 
-This version runs on HTTP with Server-Sent Events (SSE) transport,
-allowing web-based clients like ChatGPT to connect.
+Runs the MCP SSE transport alongside internal REST/WebSocket
+endpoints for dashboard-api consumption:
+  - GET  /api/telemetry   — TelemetryService snapshot
+  - GET  /api/activity    — FlightActivity + telemetry
+  - GET  /api/mission     — Current mission state
+  - GET  /api/health      — System health
+  - WS   /ws/telemetry    — Push telemetry at 2Hz
+  - /sse, /messages/      — MCP SSE transport (unchanged)
 """
 
 import sys
 import os
+import asyncio
+import json
+import time
+import logging
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# Configuration - must set BEFORE importing droneserver module
+# Configuration
 PORT = int(os.environ.get("MCP_PORT", "8080"))
 HOST = os.environ.get("MCP_HOST", "0.0.0.0")
-MOUNT_PATH = os.environ.get("MCP_MOUNT_PATH", "/mcp")
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -25,80 +34,214 @@ env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # Now import after env vars are set
-from src.server.droneserver import logger
+from src.server.droneserver import (
+    logger, mcp, get_or_create_global_connector, LogColors,
+)
+
+from starlette.applications import Starlette
+from starlette.routing import Route, WebSocketRoute, Mount
+from starlette.responses import JSONResponse
+from starlette.websockets import WebSocket, WebSocketDisconnect
+
+
+# ============================================================
+# Accessor for global connector (avoids stale module-level ref)
+# ============================================================
+
+def _connector():
+    """Get the current global connector (re-imports to avoid stale reference)."""
+    from src.server.droneserver import _global_connector
+    return _global_connector
+
+
+# ============================================================
+# REST Endpoints
+# ============================================================
+
+async def api_telemetry(request):
+    """GET /api/telemetry — TelemetryService snapshot."""
+    conn = _connector()
+    if conn is None or conn.telemetry is None:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
+    snapshot = conn.telemetry.get_snapshot()
+    return JSONResponse({"status": "ok", **snapshot})
+
+
+async def api_activity(request):
+    """GET /api/activity — current FlightActivity + telemetry."""
+    conn = _connector()
+    if conn is None:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
+
+    telemetry = conn.telemetry.get_snapshot() if conn.telemetry else {}
+
+    activity = conn.current_activity
+    activity_data = None
+    if activity:
+        activity_data = {
+            "id": activity.id,
+            "type": activity.type,
+            "status": activity.status,
+            "started_at": activity.started_at,
+            "completed_at": activity.completed_at,
+            "description": activity.description,
+            "command_tool": activity.command_tool,
+            "waypoint_count": activity.waypoint_count,
+            "total_distance_m": activity.total_distance_m,
+            "speed_m_s": activity.speed_m_s,
+            "altitude_m": activity.altitude_m,
+            "mission_id": activity.mission_id,
+        }
+
+    return JSONResponse({
+        "status": "ok",
+        "telemetry": telemetry,
+        "activity": activity_data,
+    })
+
+
+async def api_mission(request):
+    """GET /api/mission — current mission state."""
+    conn = _connector()
+    if conn is None:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
+
+    mission = conn.current_mission
+    if mission is None:
+        return JSONResponse({"status": "ok", "mission": None})
+    return JSONResponse({"status": "ok", **mission.to_dict()})
+
+
+async def api_health(request):
+    """GET /api/health — overall system health for dashboard."""
+    conn = _connector()
+    connected = conn is not None and conn.connection_ready.is_set()
+    perception_url = os.environ.get("PERCEPTION_URL", "http://localhost:8090")
+    return JSONResponse({
+        "status": "ok",
+        "drone_connected": connected,
+        "perception_url": perception_url,
+        "mcp_port": PORT,
+    })
+
+
+# ============================================================
+# WebSocket Endpoints
+# ============================================================
+
+async def ws_telemetry(websocket: WebSocket):
+    """WS /ws/telemetry — push telemetry + activity + mission at 2Hz."""
+    await websocket.accept()
+    logger.info(f"{LogColors.HTTP}WS /ws/telemetry connected{LogColors.RESET}")
+
+    try:
+        while True:
+            conn = _connector()
+            if conn and conn.telemetry:
+                snapshot = conn.telemetry.get_snapshot()
+
+                activity = conn.current_activity
+                activity_data = None
+                if activity:
+                    activity_data = {
+                        "id": activity.id,
+                        "type": activity.type,
+                        "status": activity.status,
+                        "description": activity.description,
+                    }
+
+                mission = conn.current_mission
+                mission_data = mission.to_dict() if mission else None
+
+                payload = {
+                    "ts": time.time(),
+                    "telemetry": snapshot,
+                    "activity": activity_data,
+                    "mission": mission_data,
+                }
+            else:
+                payload = {"ts": time.time(), "telemetry": None, "status": "not_ready"}
+
+            await websocket.send_text(json.dumps(payload))
+            await asyncio.sleep(0.5)  # 2Hz
+
+    except WebSocketDisconnect:
+        logger.info(f"{LogColors.HTTP}WS /ws/telemetry disconnected{LogColors.RESET}")
+    except Exception as e:
+        logger.warning(f"WS /ws/telemetry error: {e}")
+
+
+# ============================================================
+# Application Factory
+# ============================================================
+
+@asynccontextmanager
+async def app_lifespan(app):
+    """Initialize the global drone connector on startup."""
+    logger.info("Initializing drone connection (parent app lifespan)...")
+    await get_or_create_global_connector()
+    yield
+    logger.info("Server shutting down")
+
+
+def create_app() -> Starlette:
+    """Create Starlette app with MCP SSE mounted alongside internal API routes.
+
+    Route priority: explicit /api/* and /ws/* routes first,
+    then MCP SSE app catches /sse and /messages/* at root mount.
+    """
+    mcp_app = mcp.sse_app()
+
+    routes = [
+        # Internal API for dashboard-api
+        Route("/api/telemetry", api_telemetry),
+        Route("/api/activity", api_activity),
+        Route("/api/mission", api_mission),
+        Route("/api/health", api_health),
+        WebSocketRoute("/ws/telemetry", ws_telemetry),
+        # MCP SSE at root — handles /sse and /messages/
+        Mount("/", app=mcp_app),
+    ]
+
+    return Starlette(routes=routes, lifespan=app_lifespan)
+
+
+# ============================================================
+# Entry Point
+# ============================================================
 
 if __name__ == "__main__":
+    import uvicorn
+
     logger.info("=" * 60)
-    logger.info("MAVLink MCP Server - HTTP/SSE Mode")
+    logger.info("MAVLink MCP Server - HTTP/SSE + Internal API")
     logger.info("=" * 60)
-    logger.info(f"Starting SSE server on {HOST}:{PORT}")
-    logger.info("")
-    logger.info("Connect from ChatGPT Developer Mode using ngrok HTTPS:")
-    logger.info(f"  https://YOUR-NGROK-ID.ngrok-free.app/sse")
-    logger.info("")
-    logger.info(f"Example: https://abc123xyz.ngrok-free.app/sse")
+    logger.info(f"  MCP SSE:     http://{HOST}:{PORT}/sse")
+    logger.info(f"  Telemetry:   http://{HOST}:{PORT}/api/telemetry")
+    logger.info(f"  Activity:    http://{HOST}:{PORT}/api/activity")
+    logger.info(f"  Mission:     http://{HOST}:{PORT}/api/mission")
+    logger.info(f"  Health:      http://{HOST}:{PORT}/api/health")
+    logger.info(f"  WS Telem:    ws://{HOST}:{PORT}/ws/telemetry")
     logger.info("=" * 60)
-    logger.info("")
-    logger.info(f"⚠️  IMPORTANT: Use /sse (not /mcp/sse)")
-    logger.info(f"   Server will start on port {PORT}")
-    logger.info("   Make sure ngrok forwards to this port:")
-    logger.info(f"   ngrok http {PORT}")
-    logger.info("")
-    logger.info("=" * 60)
-    
-    # Import the mcp instance with all tools registered
-    from src.server.droneserver import mcp
-    import threading
-    import time
-    import requests
-    
-    # Update settings on the existing mcp instance
-    mcp.settings.host = HOST
-    mcp.settings.port = PORT
-    
-    # Trigger connection initialization after server starts
-    def trigger_initialization():
-        """Make a request to the server to trigger lifespan and connection initialization"""
-        logger.info("🔧 Background: Waiting for server to start...")
-        time.sleep(3)  # Give uvicorn time to fully start
-        
-        try:
-            logger.info("🔧 Triggering connection initialization via GET /sse...")
-            # Make a simple GET request to trigger the lifespan
-            response = requests.get(f"http://localhost:{PORT}/sse", timeout=5)
-            logger.info(f"✓ Initialization request completed (status: {response.status_code})")
-        except Exception as e:
-            logger.warning(f"Initialization trigger request failed (this is normal): {e}")
-            logger.info("Connection will initialize on first ChatGPT request instead.")
-    
-    # Start background thread to trigger initialization
-    init_thread = threading.Thread(target=trigger_initialization, daemon=True)
-    init_thread.start()
-    
-    # Suppress noisy HTTP/framework logs using a filter (most reliable method)
-    import logging
-    
-    # Check for verbose mode first
+
     verbose_mode = os.getenv("MAVLINK_VERBOSE", "0") == "1"
-    
+
     if not verbose_mode:
-        # Create a filter that drops all uvicorn access logs
-        class SuppressUvicornFilter(logging.Filter):
+        class SuppressPollingFilter(logging.Filter):
+            """Allow /api/ and /ws/ access logs, suppress MCP SSE polling."""
             def filter(self, record):
-                return False  # Drop all records
-        
-        # Add filter to uvicorn.access logger (this survives uvicorn reconfiguration)
+                msg = record.getMessage()
+                if "/api/" in msg or "/ws/" in msg:
+                    return True
+                return False
+
         uvicorn_access = logging.getLogger("uvicorn.access")
-        uvicorn_access.addFilter(SuppressUvicornFilter())
-        
-        # Also suppress FastMCP's "Processing request" logs
+        uvicorn_access.addFilter(SuppressPollingFilter())
+
         mcp_server = logging.getLogger("mcp.server")
         mcp_server.setLevel(logging.WARNING)
-        
-        logger.info("🔇 HTTP access logs suppressed (set MAVLINK_VERBOSE=1 to re-enable)")
-    else:
-        logger.info("🔍 VERBOSE MODE: Showing all HTTP and framework logs")
-    
-    # Run server with SSE transport using default mount path
-    mcp.run(transport='sse')
 
+        logger.info("HTTP access logs suppressed (set MAVLINK_VERBOSE=1 to re-enable)")
+
+    app = create_app()
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info")

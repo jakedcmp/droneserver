@@ -1,11 +1,13 @@
 """Perception service — FastAPI app for camera capture, YOLO, and Claude Vision."""
 
+import asyncio
+import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -381,6 +383,100 @@ async def get_image_png(image_ref: str):
 
 # Note: /findings endpoint removed — core (droneserver) owns mission findings.
 # Perception stores images and raw detections only.
+
+
+# --- Video streaming ---
+
+@app.websocket("/ws/video/{camera_name}")
+async def ws_video(websocket: WebSocket, camera_name: str):
+    """Stream JPEG frames over WebSocket. Client can send {"fps": N} to adjust rate."""
+    if not _camera_source:
+        await websocket.close(code=1011, reason="Camera not initialized")
+        return
+
+    available = _camera_source.get_available_cameras()
+    if camera_name not in available:
+        await websocket.close(code=1008, reason=f"Unknown camera: {camera_name}")
+        return
+
+    await websocket.accept()
+    fps = 5.0
+    logger.info(f"Video WS connected: {camera_name} @ {fps}fps")
+
+    # Task to listen for client fps adjustments
+    fps_lock = asyncio.Lock()
+
+    async def listen_for_control():
+        nonlocal fps
+        try:
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                    if "fps" in msg:
+                        new_fps = max(1.0, min(30.0, float(msg["fps"])))
+                        async with fps_lock:
+                            fps = new_fps
+                        logger.info(f"Video WS {camera_name}: fps adjusted to {fps}")
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        except WebSocketDisconnect:
+            pass
+
+    control_task = asyncio.create_task(listen_for_control())
+
+    try:
+        while True:
+            async with fps_lock:
+                current_fps = fps
+            interval = 1.0 / current_fps
+            start = time.monotonic()
+
+            try:
+                frame = await _camera_source.capture_frame(camera_name, "scene")
+            except Exception as e:
+                logger.warning(f"Video WS capture error: {e}")
+                await asyncio.sleep(interval)
+                continue
+
+            # Convert PNG to JPEG for bandwidth efficiency
+            frame_bytes = frame.png_bytes
+            frame_format = "png"
+            try:
+                import cv2
+                import numpy as np
+                img_1d = np.frombuffer(frame.png_bytes, dtype=np.uint8)
+                img = cv2.imdecode(img_1d, cv2.IMREAD_COLOR)
+                _, jpeg_buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                frame_bytes = jpeg_buf.tobytes()
+                frame_format = "jpeg"
+            except ImportError:
+                pass  # Fall back to PNG if cv2 unavailable
+
+            # Send JSON metadata as text frame
+            meta = {
+                "camera": camera_name,
+                "ts": time.time(),
+                "width": frame.width,
+                "height": frame.height,
+                "fps": current_fps,
+                "format": frame_format,
+            }
+            await websocket.send_text(json.dumps(meta))
+
+            # Send frame as binary
+            await websocket.send_bytes(frame_bytes)
+
+            elapsed = time.monotonic() - start
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+
+    except WebSocketDisconnect:
+        logger.info(f"Video WS disconnected: {camera_name}")
+    except Exception as e:
+        logger.warning(f"Video WS error: {e}")
+    finally:
+        control_task.cancel()
 
 
 # --- Entry point ---
