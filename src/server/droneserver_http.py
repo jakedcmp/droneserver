@@ -179,18 +179,22 @@ async def ws_telemetry(websocket: WebSocket):
 async def app_lifespan(app):
     """Initialize the global drone connector on startup."""
     logger.info("Initializing drone connection (parent app lifespan)...")
-    await get_or_create_global_connector()
-    yield
+    async with mcp.session_manager.run():
+        await get_or_create_global_connector()
+        yield
     logger.info("Server shutting down")
 
 
 def create_app() -> Starlette:
-    """Create Starlette app with MCP SSE mounted alongside internal API routes.
+    """Create Starlette app with dual MCP transports plus internal API routes.
 
-    Route priority: explicit /api/* and /ws/* routes first,
-    then MCP SSE app catches /sse and /messages/* at root mount.
+    Route priority: explicit /api/* and /ws/* routes first.
+    Expose:
+      - SSE transport at /sse (+ /messages/*)
+      - Streamable HTTP transport at /mcp
     """
-    mcp_app = mcp.sse_app()
+    mcp_sse_app = mcp.sse_app()
+    mcp_streamable_http_app = mcp.streamable_http_app()
 
     routes = [
         # Internal API for dashboard-api
@@ -199,8 +203,10 @@ def create_app() -> Starlette:
         Route("/api/mission", api_mission),
         Route("/api/health", api_health),
         WebSocketRoute("/ws/telemetry", ws_telemetry),
-        # MCP SSE at root — handles /sse and /messages/
-        Mount("/", app=mcp_app),
+        # MCP streamable HTTP for Codex and other modern clients
+        Route("/mcp", endpoint=mcp_streamable_http_app),
+        # MCP SSE for Claude/legacy clients — handles /sse and /messages/
+        Mount("/", app=mcp_sse_app),
     ]
 
     return Starlette(routes=routes, lifespan=app_lifespan)
@@ -214,8 +220,9 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info("=" * 60)
-    logger.info("MAVLink MCP Server - HTTP/SSE + Internal API")
+    logger.info("MAVLink MCP Server - Dual MCP Transports + Internal API")
     logger.info("=" * 60)
+    logger.info(f"  MCP HTTP:    http://{HOST}:{PORT}/mcp")
     logger.info(f"  MCP SSE:     http://{HOST}:{PORT}/sse")
     logger.info(f"  Telemetry:   http://{HOST}:{PORT}/api/telemetry")
     logger.info(f"  Activity:    http://{HOST}:{PORT}/api/activity")

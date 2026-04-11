@@ -677,6 +677,16 @@ class TelemetryService:
             return float("inf")
         return time.time() - entry.updated_at
 
+    def _json_safe(self, value):
+        """Recursively replace non-finite floats with None for HTTP/JSON responses."""
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {key: self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        return value
+
     def get_snapshot(self) -> dict:
         """All telemetry as a JSON-serializable dict for tools and future WebSocket push."""
         pos = self.get("position")
@@ -726,7 +736,7 @@ class TelemetryService:
                 name: round(self.get_age(name), 1) for name in self.STREAMS
             },
         }
-        return snapshot
+        return self._json_safe(snapshot)
 
 
 @dataclass

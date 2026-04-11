@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from .vision.yolo import run_yolo_async, YOLO_AVAILABLE
 from .vision.claude_vision import analyze as claude_vision_analyze, ANTHROPIC_AVAILABLE
 
 logger = logging.getLogger("perception")
+VIDEO_JPEG_QUALITY = max(1, min(100, int(os.environ.get("VIDEO_JPEG_QUALITY", "85"))))
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -447,7 +449,11 @@ async def ws_video(websocket: WebSocket, camera_name: str):
                 import numpy as np
                 img_1d = np.frombuffer(frame.png_bytes, dtype=np.uint8)
                 img = cv2.imdecode(img_1d, cv2.IMREAD_COLOR)
-                _, jpeg_buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                _, jpeg_buf = cv2.imencode(
+                    '.jpg',
+                    img,
+                    [cv2.IMWRITE_JPEG_QUALITY, VIDEO_JPEG_QUALITY],
+                )
                 frame_bytes = jpeg_buf.tobytes()
                 frame_format = "jpeg"
             except ImportError:

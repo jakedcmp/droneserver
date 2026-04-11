@@ -1,6 +1,7 @@
 """AirSim camera source — captures frames from Cosys-AirSim simulator."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import math
 import os
@@ -31,19 +32,35 @@ class AirSimSource(CameraSource):
     def __init__(self, host: str | None = None):
         self._host = host or os.environ.get("AIRSIM_HOST", "airsim")
         self._client: "airsim.MultirotorClient | None" = None
+        self._client_lock = asyncio.Lock()
+        self._rpc_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="airsim-rpc",
+        )
+        self._jpeg_quality = max(1, min(100, int(os.environ.get("VIDEO_JPEG_QUALITY", "85"))))
+
+    async def _run_rpc(self, func):
+        """Run all AirSim RPC calls on one dedicated thread.
+
+        cosysairsim internally uses tornado/msgpack-rpc state that is not safe to
+        bounce across arbitrary executor threads.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._rpc_executor, func)
 
     async def _ensure_client(self) -> "airsim.MultirotorClient":
         if self._client is None:
-            # cosysairsim uses msgpack-rpc/tornado which conflicts with asyncio
-            # Must run connection in executor to avoid event loop conflicts
-            loop = asyncio.get_event_loop()
-            port = int(os.environ.get("AIRSIM_PORT", "41451"))
-            def _connect():
-                client = airsim.MultirotorClient(ip=self._host, port=port)
-                client.confirmConnection()
-                return client
-            self._client = await loop.run_in_executor(None, _connect)
-            logger.info(f"AirSim connected to {self._host}:{port}")
+            async with self._client_lock:
+                if self._client is None:
+                    port = int(os.environ.get("AIRSIM_PORT", "41451"))
+
+                    def _connect():
+                        client = airsim.MultirotorClient(ip=self._host, port=port)
+                        client.confirmConnection()
+                        return client
+
+                    self._client = await self._run_rpc(_connect)
+                    logger.info(f"AirSim connected to {self._host}:{port}")
         return self._client
 
     async def capture_frame(self, camera_name: str, image_type: str = "scene") -> FrameResult:
@@ -53,10 +70,9 @@ class AirSimSource(CameraSource):
         type_map = {"scene": 0, "depth": 2, "segmentation": 5}
         airsim_type = type_map.get(image_type, 0)
 
-        loop = asyncio.get_event_loop()
         client = await self._ensure_client()
-        responses = await loop.run_in_executor(
-            None,
+
+        responses = await self._run_rpc(
             lambda: client.simGetImages([
                 airsim.ImageRequest(camera_name, airsim_type, False, False)
             ])
@@ -87,7 +103,11 @@ class AirSimSource(CameraSource):
                 if CV2_AVAILABLE:
                     img_1d = np.frombuffer(frame.png_bytes, dtype=np.uint8)
                     img = cv2.imdecode(img_1d, cv2.IMREAD_COLOR)
-                    _, jpeg_buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    _, jpeg_buf = cv2.imencode(
+                        '.jpg',
+                        img,
+                        [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality],
+                    )
                     yield jpeg_buf.tobytes()
                 else:
                     yield frame.png_bytes
@@ -110,10 +130,7 @@ class AirSimSource(CameraSource):
                 math.radians(yaw_deg),
             ),
         )
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, lambda: client.simSetCameraPose(camera_name, pose)
-        )
+        await self._run_rpc(lambda: client.simSetCameraPose(camera_name, pose))
 
     def get_available_cameras(self) -> list[str]:
         return ["front_center", "bottom_center"]
