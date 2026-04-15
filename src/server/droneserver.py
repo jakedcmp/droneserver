@@ -17,6 +17,11 @@ import time
 import json
 from dotenv import load_dotenv
 from pathlib import Path
+from src.server.autopilot_adapter import (
+    AutopilotAdapter,
+    create_autopilot_adapter,
+    resolve_autopilot_backend,
+)
 
 # httpx for perception-service proxy calls
 try:
@@ -753,6 +758,10 @@ class MAVLinkConnector:
     telemetry: TelemetryService | None = field(default=None)
     # Perception service URL (vision tools proxy here)
     perception_url: str = field(default="")
+    # Resolved backend identity
+    autopilot_backend: str = field(default="")
+    # Adapter for backend-specific movement and mode control
+    backend_adapter: AutopilotAdapter | None = field(default=None)
 
 # Global connector instance - persists across all HTTP requests
 _global_connector: MAVLinkConnector | None = None
@@ -834,12 +843,14 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
         address = os.environ.get("MAVLINK_ADDRESS", "")
         port = os.environ.get("MAVLINK_PORT", "14540")
         protocol = os.environ.get("MAVLINK_PROTOCOL", "udp").lower()
+        autopilot_backend = resolve_autopilot_backend(os.environ.get("AUTOPILOT_BACKEND"))
         
         # Display connection configuration
         logger.info("Configuration loaded from .env file:")
         logger.info("  MAVLINK_ADDRESS: %s", address if address else "(not set)")
         logger.info("  MAVLINK_PORT: %s", port)
         logger.info("  MAVLINK_PROTOCOL: %s", protocol)
+        logger.info("  AUTOPILOT_BACKEND: %s", autopilot_backend)
         logger.info("=" * 60)
         
         # Empty or 0.0.0.0 address = MAVSDK listen mode (udp://:PORT)
@@ -866,6 +877,8 @@ async def get_or_create_global_connector() -> MAVLinkConnector:
             connection_ready=connection_ready,
             telemetry=TelemetryService(drone),
             perception_url=perception_url,
+            autopilot_backend=autopilot_backend,
+            backend_adapter=create_autopilot_adapter(drone, autopilot_backend),
         )
 
         # Start drone connection in background
@@ -995,11 +1008,8 @@ async def get_position(ctx: Context) -> dict:
 @mcp.tool()
 async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: float, yaw_deg: float = 0.0) -> dict:
     """
-    Move the drone relative to the current position using ArduPilot's GUIDED mode.
-    
-    ArduPilot automatically enters GUIDED mode when receiving goto_location commands
-    (as long as the drone is armed). No manual mode switching required.
-    
+    Move the drone relative to the current position using backend-specific navigation control.
+
     The drone must be armed and in the air. Waits for connection if not ready.
 
     Args:
@@ -1019,61 +1029,42 @@ async def move_to_relative(ctx: Context, north_m: float, east_m: float, down_m: 
     if not await ensure_connection(connector):
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
-    drone = connector.drone
-
     try:
-        # Get current position
-        position = await drone.telemetry.position().__anext__()
-        current_lat = position.latitude_deg
-        current_lon = position.longitude_deg
-        # IMPORTANT: goto_location() requires ABSOLUTE altitude (MSL), not relative!
-        current_alt = position.absolute_altitude_m
-        
-        # Calculate target altitude (down is positive in NED, so negate)
-        target_alt = current_alt - down_m
-        
-        # Convert NED offsets (meters) to lat/lon offsets (degrees)
-        # Earth radius in meters (approximate)
-        EARTH_RADIUS = 6371000.0
-        
-        # Latitude: 1 degree = ~111,320 meters (constant)
-        # north_m positive = increase latitude
-        lat_offset_deg = north_m / 111320.0
-        
-        # Longitude: varies with latitude
-        # east_m positive = increase longitude
-        lon_offset_deg = east_m / (111320.0 * math.cos(math.radians(current_lat)))
-        
-        # Calculate target position
-        target_lat = current_lat + lat_offset_deg
-        target_lon = current_lon + lon_offset_deg
-        
-        logger.info(f"Moving in GUIDED mode:")
-        logger.info(f"  Current: {current_lat:.6f}°, {current_lon:.6f}°")
-        logger.info(f"  Altitude: {position.relative_altitude_m:.1f}m AGL (relative) / {current_alt:.1f}m MSL")
+        adapter = connector.backend_adapter
+        if adapter is None:
+            return {"status": "failed", "error": "Autopilot adapter not initialized."}
+
+        movement = await adapter.move_to_relative(north_m, east_m, down_m, yaw_deg)
+        current_position = movement.get("current_position", {})
+        target_position = movement.get("target_position", {})
+
+        logger.info(f"Relative move via backend={connector.autopilot_backend}")
+        if current_position:
+            logger.info(
+                "  Current: %.6f°, %.6f° @ %.1fm MSL",
+                current_position["latitude_deg"],
+                current_position["longitude_deg"],
+                current_position["absolute_altitude_m"],
+            )
         logger.info(f"  Offset: north={north_m:.1f}m, east={east_m:.1f}m, down={down_m:.1f}m")
-        target_rel_alt = position.relative_altitude_m - down_m
-        logger.info(f"  Target: {target_lat:.6f}°, {target_lon:.6f}°, {target_rel_alt:.1f}m AGL (relative) / {target_alt:.1f}m MSL")
-        
-        # Use goto_location with calculated target coordinates
-        log_mavlink_cmd("drone.action.goto_location", lat=f"{target_lat:.6f}", lon=f"{target_lon:.6f}", alt=f"{target_alt:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
-        await drone.action.goto_location(
-            target_lat,
-            target_lon,
-            target_alt,
-            yaw_deg
-        )
-        
-        logger.info("✓ Movement command sent successfully")
-        return {
+        if target_position:
+            logger.info(
+                "  Target: %.6f°, %.6f° @ %.1fm MSL",
+                target_position["latitude_deg"],
+                target_position["longitude_deg"],
+                target_position["altitude_m"],
+            )
+
+        result = {
             "status": "success", 
             "message": f"Moving: north={north_m}m, east={east_m}m, altitude_change={-down_m}m",
-            "target_position": {
-                "latitude_deg": target_lat,
-                "longitude_deg": target_lon,
-                "altitude_m": target_alt
-            }
+            "target_position": target_position,
+            "backend": connector.autopilot_backend,
         }
+        if movement.get("note"):
+            result["note"] = movement["note"]
+        log_tool_output(result)
+        return result
         
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to execute relative movement: {e}{LogColors.RESET}")
@@ -1460,6 +1451,23 @@ async def initiate_mission(ctx: Context, mission_points: list, return_to_launch:
     }
 
 @mcp.tool()
+async def get_backend_info(ctx: Context) -> dict:
+    """Get the configured autopilot backend and its control capabilities."""
+    log_tool_call("get_backend_info")
+    connector = ctx.request_context.lifespan_context
+    adapter = connector.backend_adapter
+    if adapter is None:
+        return {"status": "failed", "error": "Autopilot adapter not initialized."}
+
+    result = {
+        "status": "success",
+        "backend": await adapter.get_backend_info(),
+        "connected": connector.connection_ready.is_set(),
+    }
+    log_tool_output(result)
+    return result
+
+@mcp.tool()
 async def get_flight_mode(ctx: Context) -> dict:
     """
     Get the current flight mode of the drone. Waits for connection if not ready.
@@ -1513,18 +1521,9 @@ async def set_flight_mode(ctx: Context, mode: str) -> dict:
     if not await ensure_connection(connector):
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
-    drone = connector.drone
     mode_upper = mode.upper().strip()
     
-    # Map mode names to MAVSDK actions
-    supported_modes = {
-        "HOLD": "hold",
-        "LOITER": "hold",  # LOITER maps to hold action
-        "RTL": "return_to_launch",
-        "RETURN_TO_LAUNCH": "return_to_launch",
-        "LAND": "land",
-        "GUIDED": "guided",
-    }
+    supported_modes = {"HOLD", "LOITER", "RTL", "RETURN_TO_LAUNCH", "LAND", "GUIDED"}
     
     if mode_upper not in supported_modes:
         return {
@@ -1534,55 +1533,37 @@ async def set_flight_mode(ctx: Context, mode: str) -> dict:
         }
     
     try:
-        action_name = supported_modes[mode_upper]
-        
-        if action_name == "hold":
-            log_mavlink_cmd("drone.action.hold")
-            await drone.action.hold()
-            result_mode = "HOLD/LOITER"
-            
-        elif action_name == "return_to_launch":
-            log_mavlink_cmd("drone.action.return_to_launch")
-            await drone.action.return_to_launch()
-            result_mode = "RTL"
-            
-        elif action_name == "land":
-            log_mavlink_cmd("drone.action.land")
-            await drone.action.land()
-            result_mode = "LAND"
-            
-        elif action_name == "guided":
-            # For GUIDED, we need to send a position command to enter GUIDED mode
-            # Get current position and command drone to hold there
-            position = await drone.telemetry.position().__anext__()
-            log_mavlink_cmd("drone.action.goto_location (GUIDED mode)", 
-                          lat=f"{position.latitude_deg:.6f}", 
-                          lon=f"{position.longitude_deg:.6f}",
-                          alt=f"{position.absolute_altitude_m:.1f}")
-            await drone.action.goto_location(
-                position.latitude_deg,
-                position.longitude_deg,
-                position.absolute_altitude_m,
-                float('nan')  # Maintain current yaw
-            )
-            result_mode = "GUIDED"
+        adapter = connector.backend_adapter
+        if adapter is None:
+            return {"status": "failed", "error": "Autopilot adapter not initialized."}
+
+        mode_result = await adapter.set_flight_mode(mode_upper)
         
         # Verify mode changed
         await asyncio.sleep(0.5)
         try:
-            new_mode = await drone.telemetry.flight_mode().__anext__()
+            new_mode = await connector.drone.telemetry.flight_mode().__anext__()
             actual_mode = str(new_mode)
-        except:
+        except Exception:
             actual_mode = "UNKNOWN"
         
-        logger.info(f"{LogColors.SUCCESS}✅ Flight mode set to {result_mode} (actual: {actual_mode}){LogColors.RESET}")
-        
-        return {
+        logger.info(
+            f"{LogColors.SUCCESS}✅ Flight mode request {mode_upper} handled by backend={connector.autopilot_backend} "
+            f"(actual: {actual_mode}){LogColors.RESET}"
+        )
+
+        result = {
             "status": "success",
-            "message": f"Flight mode changed to {result_mode}",
+            "message": mode_result.get("message", f"Flight mode request accepted: {mode_upper}"),
             "requested_mode": mode_upper,
-            "actual_mode": actual_mode
+            "actual_mode": actual_mode,
+            "backend": connector.autopilot_backend,
+            "semantic_mode": mode_result.get("semantic_mode", mode_upper),
         }
+        if mode_result.get("note"):
+            result["note"] = mode_result["note"]
+        log_tool_output(result)
+        return result
         
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to set flight mode: {e}{LogColors.RESET}")
@@ -1704,12 +1685,9 @@ async def kill_motors(ctx: Context) -> dict:
 @mcp.tool()
 async def hold_position(ctx: Context) -> dict:
     """
-    Command the drone to hold its current position while staying in GUIDED mode.
+    Command the drone to hold its current position using backend-specific station keeping.
     Useful for pausing during flight to assess situation or wait.
     Waits for connection if not ready.
-    
-    Note: This uses goto_location with current position instead of hold() to avoid
-          switching to LOITER mode which can cause unwanted altitude changes.
 
     Args:
         ctx (Context): The context of the request.
@@ -1723,40 +1701,25 @@ async def hold_position(ctx: Context) -> dict:
     if not await ensure_connection(connector):
         return {"status": "failed", "error": "Drone connection timeout. Please wait and try again."}
     
-    drone = connector.drone
     log_tool_call("hold_position")
-    logger.info("Commanding drone to hold position (staying in GUIDED mode)")
+    logger.info(f"Commanding drone to hold position via backend={connector.autopilot_backend}")
     
     try:
-        # Get current position
-        position = await drone.telemetry.position().__anext__()
-        current_lat = position.latitude_deg
-        current_lon = position.longitude_deg
-        current_alt = position.absolute_altitude_m
-        
-        # Send goto_location with current position - keeps drone in GUIDED mode
-        # This prevents the altitude drop that occurs when switching to LOITER mode
-        log_mavlink_cmd("drone.action.goto_location", lat=f"{current_lat:.6f}", lon=f"{current_lon:.6f}", alt=f"{current_alt:.1f}")
-        await drone.action.goto_location(
-            current_lat,
-            current_lon,
-            current_alt,
-            float('nan')  # Maintain current heading
-        )
-        
-        logger.info(f"{LogColors.SUCCESS}✓ Holding position at ({current_lat:.6f}, {current_lon:.6f}) @ {position.relative_altitude_m:.1f}m AGL (relative) / {current_alt:.1f}m MSL{LogColors.RESET}")
-        
-        return {
+        adapter = connector.backend_adapter
+        if adapter is None:
+            return {"status": "failed", "error": "Autopilot adapter not initialized."}
+
+        hold_result = await adapter.hold_position()
+        result = {
             "status": "success",
-            "message": "Drone holding position in GUIDED mode",
-            "position": {
-                "latitude_deg": current_lat,
-                "longitude_deg": current_lon,
-                "altitude_m": position.relative_altitude_m,
-                "altitude_rel": position.relative_altitude_m
-            },
-            "note": "Using GUIDED mode instead of LOITER to prevent altitude drift"
+            "message": hold_result.get("message", "Drone holding position"),
+            "position": hold_result.get("position"),
+            "backend": connector.autopilot_backend,
         }
+        if hold_result.get("note"):
+            result["note"] = hold_result["note"]
+        log_tool_output(result)
+        return result
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Hold position failed: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Hold position failed: {str(e)}"}
@@ -1890,7 +1853,13 @@ async def get_health(ctx: Context) -> dict:
                 health_data["warnings"] = warnings
             
             logger.info(f"{LogColors.STATUS}System health: {health_data['overall_status']}{LogColors.RESET}")
-            return {"status": "success", "health": health_data}
+            result = {
+                "status": "success",
+                "health": health_data,
+                "backend": await connector.backend_adapter.get_backend_info() if connector.backend_adapter else None,
+            }
+            log_tool_output(result)
+            return result
     except Exception as e:
         logger.error(f"{LogColors.ERROR}❌ TOOL ERROR - Failed to get health status: {e}{LogColors.RESET}")
         return {"status": "failed", "error": f"Health check failed: {str(e)}"}
@@ -2176,10 +2145,11 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
         
         logger.info(f"Flying to GPS location: {latitude_deg}, {longitude_deg} at {relative_alt:.1f}m AGL / {absolute_altitude_m:.1f}m MSL")
         logger.info(f"Distance to target: {initial_distance:.1f}m, ETA: {eta_seconds:.0f}s")
-        
-        log_mavlink_cmd("drone.action.goto_location", lat=f"{latitude_deg:.6f}", lon=f"{longitude_deg:.6f}", 
-                       alt=f"{absolute_altitude_m:.1f}", yaw=f"{yaw_deg:.1f}" if not math.isnan(yaw_deg) else "nan")
-        await drone.action.goto_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg)
+
+        adapter = connector.backend_adapter
+        if adapter is None:
+            return {"status": "failed", "error": "Autopilot adapter not initialized."}
+        await adapter.go_to_location(latitude_deg, longitude_deg, absolute_altitude_m, yaw_deg)
         
         # Create FlightActivity for unified tracking
         connector.current_activity = FlightActivity(
@@ -2206,6 +2176,7 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
             "message": "Navigation started. Call get_drone_activity() to track progress.",
             "initial_distance_m": round(initial_distance, 1),
             "estimated_flight_time_seconds": round(eta_seconds, 0),
+            "backend": connector.autopilot_backend,
             "target": {
                 "latitude": latitude_deg,
                 "longitude": longitude_deg,
@@ -2215,6 +2186,8 @@ async def go_to_location(ctx: Context, latitude_deg: float, longitude_deg: float
             },
             "next_step": "Call get_drone_activity() repeatedly until mission_complete is true"
         }
+        if connector.autopilot_backend == "px4":
+            result["note"] = "PX4 navigation uses direct goto commands without a separate GUIDED mode switch."
         log_tool_output(result)
         return result
         
@@ -5814,6 +5787,8 @@ async def get_drone_activity(ctx: Context) -> dict:
 
     # --- Build response ---
     response = {"status": "success", "telemetry": telemetry}
+    if connector.backend_adapter:
+        response["backend"] = await connector.backend_adapter.get_backend_info()
 
     if not activity:
         response["activity"] = None

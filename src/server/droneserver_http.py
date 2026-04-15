@@ -74,6 +74,7 @@ async def api_activity(request):
         return JSONResponse({"status": "not_ready"}, status_code=503)
 
     telemetry = conn.telemetry.get_snapshot() if conn.telemetry else {}
+    backend = await conn.backend_adapter.get_backend_info() if conn.backend_adapter else None
 
     activity = conn.current_activity
     activity_data = None
@@ -95,6 +96,7 @@ async def api_activity(request):
 
     return JSONResponse({
         "status": "ok",
+        "backend": backend,
         "telemetry": telemetry,
         "activity": activity_data,
     })
@@ -117,9 +119,11 @@ async def api_health(request):
     conn = _connector()
     connected = conn is not None and conn.connection_ready.is_set()
     perception_url = os.environ.get("PERCEPTION_URL", "http://localhost:8090")
+    backend = await conn.backend_adapter.get_backend_info() if conn and conn.backend_adapter else None
     return JSONResponse({
         "status": "ok",
         "drone_connected": connected,
+        "backend": backend,
         "perception_url": perception_url,
         "mcp_port": PORT,
     })
