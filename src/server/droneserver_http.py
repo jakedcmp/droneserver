@@ -35,7 +35,7 @@ load_dotenv(dotenv_path=env_path)
 
 # Now import after env vars are set
 from src.server.droneserver import (
-    logger, mcp, get_or_create_global_connector, LogColors,
+    logger, mcp, get_or_create_global_connector, LogColors, build_activity_snapshot,
 )
 
 from starlette.applications import Starlette
@@ -72,34 +72,11 @@ async def api_activity(request):
     conn = _connector()
     if conn is None:
         return JSONResponse({"status": "not_ready"}, status_code=503)
-
-    telemetry = conn.telemetry.get_snapshot() if conn.telemetry else {}
-    backend = await conn.backend_adapter.get_backend_info() if conn.backend_adapter else None
-
-    activity = conn.current_activity
-    activity_data = None
-    if activity:
-        activity_data = {
-            "id": activity.id,
-            "type": activity.type,
-            "status": activity.status,
-            "started_at": activity.started_at,
-            "completed_at": activity.completed_at,
-            "description": activity.description,
-            "command_tool": activity.command_tool,
-            "waypoint_count": activity.waypoint_count,
-            "total_distance_m": activity.total_distance_m,
-            "speed_m_s": activity.speed_m_s,
-            "altitude_m": activity.altitude_m,
-            "mission_id": activity.mission_id,
-        }
-
-    return JSONResponse({
-        "status": "ok",
-        "backend": backend,
-        "telemetry": telemetry,
-        "activity": activity_data,
-    })
+    snapshot = await build_activity_snapshot(conn, log_response=False)
+    if snapshot.get("status") != "success":
+        return JSONResponse(snapshot, status_code=503)
+    snapshot["status"] = "ok"
+    return JSONResponse(snapshot)
 
 
 async def api_mission(request):
@@ -142,26 +119,15 @@ async def ws_telemetry(websocket: WebSocket):
         while True:
             conn = _connector()
             if conn and conn.telemetry:
-                snapshot = conn.telemetry.get_snapshot()
-
-                activity = conn.current_activity
-                activity_data = None
-                if activity:
-                    activity_data = {
-                        "id": activity.id,
-                        "type": activity.type,
-                        "status": activity.status,
-                        "description": activity.description,
-                    }
-
-                mission = conn.current_mission
-                mission_data = mission.to_dict() if mission else None
-
+                snapshot = await build_activity_snapshot(conn, log_response=False)
                 payload = {
                     "ts": time.time(),
-                    "telemetry": snapshot,
-                    "activity": activity_data,
-                    "mission": mission_data,
+                    "telemetry": snapshot.get("telemetry"),
+                    "activity": snapshot.get("activity"),
+                    "mission": snapshot.get("mission"),
+                    "activity_complete": snapshot.get("activity_complete"),
+                    "activity_returning": snapshot.get("activity_returning"),
+                    "activity_failed": snapshot.get("activity_failed"),
                 }
             else:
                 payload = {"ts": time.time(), "telemetry": None, "status": "not_ready"}
